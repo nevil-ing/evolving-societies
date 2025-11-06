@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from typing import List
 from app.models.entity import EntityResponse
-from app.models.requests import DecisionRequest, ReproductionRequest
+from app.models.requests import DecisionRequest, ReproductionRequest, EntityCreateRequest
 from app.services.entity_service import EntityService
 from app.services.brain_service import BrainService
 
@@ -13,6 +13,32 @@ brain_service = BrainService()
 async def get_all_entities():
     """Get list of all entity IDs"""
     return entity_service.get_all_entity_ids()
+
+@router.post("/", response_model=EntityResponse)
+async def create_entity(request: EntityCreateRequest):
+    """Create a new entity"""
+    entity_id = len(entity_service.get_all_entity_ids()) + 1
+    entity_data = {
+        "id": entity_id,
+        "x": request.x,
+        "y": request.y,
+        "society_name": request.society_name,
+        "generation": request.generation,
+        "parent1_id": request.parent1_id,
+        "parent2_id": request.parent2_id,
+        "energy": 100.0,
+        "age": 0.0
+    }
+    entity_service.add_entity(entity_id, entity_data)
+    return EntityResponse(
+        id=entity_id,
+        generation=request.generation,
+        energy=100.0,
+        age=0.0,
+        society=request.society_name,
+        is_hybrid=False,
+        children_count=0
+    )
 
 @router.get("/{entity_id}", response_model=EntityResponse)
 async def get_entity(entity_id: int):

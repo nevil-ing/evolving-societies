@@ -1,0 +1,137 @@
+body {
+    margin: 0;
+    overflow: hidden;
+    background: #ffffff;
+    font-family: 'Arial', sans-serif;
+}
+canvas {
+    display: block;
+    cursor: crosshair;
+}
+.info {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 15px;
+    border-radius: 8px;
+    font-size: 11px;
+    max-width: 320px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+.society {
+    margin: 10px 0;
+    padding: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 5px;
+}
+.society-name {
+    font-weight: bold;
+    font-size: 13px;
+    margin-bottom: 5px;
+}
+.stat {
+    margin: 3px 0;
+    font-size: 10px;
+}
+.timer {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 15px 20px;
+    border-radius: 8px;
+}
+.time-display {
+    font-size: 24px;
+    font-weight: bold;
+}
+.gen-display {
+    font-size: 12px;
+    opacity: 0.8;
+    margin-top: 5px;
+}
+.controls {
+    position: absolute;
+    bottom: 20px;
+    left: 20px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 12px;
+}
+.key {
+    display: inline-block;
+    background: rgba(255, 255, 255, 0.2);
+    padding: 2px 6px;
+    border-radius: 3px;
+    margin: 2px;
+    font-weight: bold;
+}
+button {
+    background: #4a9eff;
+    border: none;
+    padding: 8px 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    color: white;
+    font-weight: bold;
+    margin: 3px;
+    font-size: 11px;
+}
+button:hover {
+    background: #6ab4ff;
+}
+.entity-info {
+    position: absolute;
+    background: rgba(0, 0, 0, 0.95);
+    color: white;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 11px;
+    pointer-events: none;
+    display: none;
+    max-width: 280px;
+}
+.trait-bar {
+    height: 8px;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+    margin: 3px 0;
+    overflow: hidden;
+}
+.trait-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #4a9eff, #00ff88);
+    border-radius: 4px;
+}
+.legend {
+    position: absolute;
+    bottom: 20px;
+    right: 20px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 10px;
+}
+.legend-item {
+    display: flex;
+    align-items: center;
+    margin: 4px 0;
+}
+.legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    margin-right: 6px;
+}
+.connection-status {
+    font-size: 10px;
+    margin-top: 5px;
+}
+

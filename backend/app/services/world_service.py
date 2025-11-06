@@ -56,3 +56,4 @@ class WorldService:
             return [f for f in files if f.endswith('.json')]
         except:
             return []
+

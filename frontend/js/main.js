@@ -1,0 +1,717 @@
+// Backend API URL
+const API_BASE_URL = 'http://localhost:8000';
+const WS_URL = 'ws://localhost:8000/ws';
+
+// Canvas setup
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+window.addEventListener('resize', () => {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+});
+
+// Game state
+let simulationTime = 0;
+let isPaused = false;
+let lastTime = Date.now();
+let timeSpeed = 1;
+let maxGeneration = 1;
+let entityIdCounter = 0;
+
+// Camera
+let camera = { x: 0, y: 0, zoom: 0.6 };
+
+// Communication signals
+const signals = [];
+const resources = [];
+let entities = [];
+let selectedEntity = null;
+
+// Backend communication
+let backend = null;
+
+// Initialize backend connection
+function initBackend() {
+    backend = new BackendCommunication();
+    
+    backend.on('connection_response', (data) => {
+        console.log('Connected to backend:', data);
+        updateConnectionStatus(true);
+    });
+    
+    backend.on('decision_result', (data) => {
+        // Handle decision results from backend
+        const entity = entities.find(e => e.id === data.entity_id);
+        if (entity && data.action) {
+            // Apply action from backend
+            applyAction(entity, data.action);
+        }
+    });
+    
+    backend.on('child_created', (data) => {
+        // Handle reproduction result
+        console.log('Child created:', data);
+    });
+}
+
+function updateConnectionStatus(connected) {
+    const statusEl = document.getElementById('connectionStatus');
+    if (statusEl) {
+        statusEl.textContent = connected ? 'Connected' : 'Disconnected';
+        statusEl.style.color = connected ? '#00ff00' : '#ff4444';
+    }
+}
+
+function applyAction(entity, action) {
+    // Apply action from neural network decision
+    if (action.type === 'move') {
+        entity.vx = action.vx || 0;
+        entity.vy = action.vy || 0;
+    } else if (action.type === 'gather') {
+        entity.moveTo(action.target_x, action.target_y, 1.2);
+    } else if (action.type === 'fight') {
+        entity.moveTo(action.target_x, action.target_y, 1.3);
+    } else if (action.type === 'mate') {
+        entity.moveTo(action.target_x, action.target_y, 0.9);
+    }
+}
+
+// Initialize world
+async function initWorld() {
+    entities = [];
+    resources.length = 0;
+    signals.length = 0;
+    simulationTime = 0;
+    maxGeneration = 1;
+    entityIdCounter = 0;
+    selectedEntity = null;
+    
+    // Reset simulation via API
+    try {
+        await fetch(`${API_BASE_URL}/api/simulation/reset`, {
+            method: 'POST'
+        });
+    } catch (error) {
+        console.error('Error resetting simulation:', error);
+    }
+    
+    // Create initial populations
+    for (let society of Object.values(societies)) {
+        for (let i = 0; i < 25; i++) {
+            const x = society.territory.x + Math.random() * society.territory.width;
+            const y = society.territory.y + Math.random() * society.territory.height;
+            const entity = new Entity(x, y, society);
+            entity.id = entityIdCounter++;
+            entities.push(entity);
+            
+            // Register entity with backend
+            try {
+                await fetch(`${API_BASE_URL}/api/entities/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        x: x,
+                        y: y,
+                        society_name: society.name,
+                        generation: 1
+                    })
+                });
+            } catch (error) {
+                console.error('Error creating entity:', error);
+            }
+        }
+    }
+    
+    // Spawn resources based on territories
+    for (let society of Object.values(societies)) {
+        const t = society.territory;
+        const foodType = society.preferredFood[0];
+        
+        // Spawn preferred food in their territory
+        for (let i = 0; i < 30; i++) {
+            resources.push(new Resource(
+                t.x + Math.random() * t.width,
+                t.y + Math.random() * t.height,
+                foodType
+            ));
+        }
+        
+        // Spawn some universal food
+        for (let i = 0; i < 10; i++) {
+            resources.push(new Resource(
+                t.x + Math.random() * t.width,
+                t.y + Math.random() * t.height,
+                'universal'
+            ));
+        }
+    }
+    
+    // Add random resources
+    for (let i = 0; i < 50; i++) {
+        const types = ['meat', 'plant', 'mineral', 'universal'];
+        resources.push(new Resource(
+            Math.random() * 1600 - 800,
+            Math.random() * 1200 - 600,
+            types[Math.floor(Math.random() * types.length)]
+        ));
+    }
+}
+
+// Update entities
+function updateEntities(deltaTime) {
+    const newEntities = [];
+    
+    for (let entity of entities) {
+        entity.age += deltaTime;
+        
+        // Energy drain based on efficiency and environment
+        const envPenalty = entity.society.environment.harshness;
+        const energyDrain = (0.2 + envPenalty * 0.1) * (1 - entity.brain.genes.efficiency * 0.4);
+        entity.energy -= deltaTime * energyDrain;
+        
+        // Diet bonus decay
+        entity.dietBonus *= 0.99;
+        
+        entity.reproductionCooldown = Math.max(0, entity.reproductionCooldown - deltaTime);
+        entity.communicationCooldown = Math.max(0, entity.communicationCooldown - deltaTime);
+        
+        if (entity.energy <= 0) {
+            continue; // Entity dies
+        }
+        
+        entity.energy = Math.min(150, entity.energy);
+        
+        // Get decision from backend if connected
+        if (backend && backend.ws && backend.ws.readyState === WebSocket.OPEN) {
+            // Use backend for AI decisions
+            backend.getEntityDecision(entity, entities, resources).then(result => {
+                if (result && result.action) {
+                    applyAction(entity, result.action);
+                }
+            }).catch(err => {
+                // Fallback to local AI if backend fails
+                localAI(entity, entities, resources, signals);
+            });
+        } else {
+            // Fallback to local AI
+            localAI(entity, entities, resources, signals);
+        }
+        
+        // Move with speed influenced by diet
+        const speedBonus = 1 + entity.dietBonus * 0.3;
+        const speed = 10 * (0.5 + entity.brain.genes.speed * 0.5) * speedBonus;
+        entity.x += entity.vx * deltaTime * speed;
+        entity.y += entity.vy * deltaTime * speed;
+        
+        entity.vx *= 0.95;
+        entity.vy *= 0.95;
+        
+        // Stay in or near territory
+        const territory = entity.society.territory;
+        const margin = 100;
+        if (entity.x < territory.x - margin) entity.vx += 0.5;
+        if (entity.x > territory.x + territory.width + margin) entity.vx -= 0.5;
+        if (entity.y < territory.y - margin) entity.vy += 0.5;
+        if (entity.y > territory.y + territory.height + margin) entity.vy -= 0.5;
+        
+        // Check for resource gathering
+        for (let resource of resources) {
+            if (resource.amount > 0 && entity.canEatResource(resource)) {
+                const dist = entity.distanceTo(resource);
+                if (dist < 15) {
+                    const value = getResourceValue(entity, resource);
+                    const taken = Math.min(value, resource.amount);
+                    resource.amount -= taken;
+                    entity.energy += taken;
+                    entity.lastMeal = resource.type;
+                }
+            }
+        }
+        
+        newEntities.push(entity);
+    }
+    
+    entities = newEntities;
+}
+
+function getResourceValue(entity, resource) {
+    const preferredFood = entity.society.preferredFood;
+    let value = 15;
+    
+    if (resource.type === 'universal') {
+        value = 20;
+    } else if (preferredFood.includes(resource.type)) {
+        value = 25;
+        
+        if (resource.type === 'meat') {
+            entity.dietBonus = 0.3;
+        } else if (resource.type === 'plant') {
+            entity.energy += 5;
+        } else if (resource.type === 'mineral') {
+            entity.brain.genes.efficiency = Math.min(1, entity.brain.genes.efficiency + 0.01);
+        }
+    }
+    
+    return value;
+}
+
+// Local AI fallback
+function localAI(entity, entities, resources, signals) {
+    const nearbyFood = resources.filter(r => {
+        if (r.amount <= 0) return false;
+        const dist = entity.distanceTo(r);
+        return dist < 250 && entity.canEatResource(r);
+    }).length;
+    
+    const nearbyAllies = entities.filter(e => 
+        e.society === entity.society && entity.distanceTo(e) < 150
+    ).length;
+    
+    const nearbyEnemies = entities.filter(e => 
+        e.society !== entity.society && entity.distanceTo(e) < 150
+    ).length;
+    
+    // Priority system
+    if (entity.energy < 40) {
+        gatherResources(entity, resources, signals);
+    } else if (nearbyEnemies > 0 && entity.brain.genes.aggression > 0.4) {
+        fight(entity, entities, signals);
+    } else if (entity.energy > 80 && entity.reproductionCooldown === 0) {
+        seekMate(entity, entities);
+    } else if (nearbyFood > 0 && entity.energy < 90) {
+        gatherResources(entity, resources, signals);
+    } else if (entity.brain.genes.cooperation > 0.5) {
+        socialize(entity, entities);
+    } else {
+        wander(entity);
+    }
+}
+
+function gatherResources(entity, resources, signals) {
+    const available = resources.filter(r => 
+        r.amount > 0 && entity.canEatResource(r)
+    ).sort((a, b) => entity.distanceTo(a) - entity.distanceTo(b));
+    
+    if (available.length === 0) {
+        if (entity.energy < 30) {
+            communicate(entity, 'help', '!', signals);
+        }
+        return;
+    }
+    
+    const nearest = available[0];
+    entity.moveTo(nearest.x, nearest.y, 1.2);
+    
+    if (entity.brain.genes.communication > 0.3 && available.length > 1 && Math.random() < 0.1) {
+        communicate(entity, 'food', '🍃', signals);
+    }
+}
+
+function fight(entity, entities, signals) {
+    const enemies = entities.filter(e => 
+        e.society !== entity.society && entity.distanceTo(e) < 150
+    );
+    
+    if (enemies.length > 0) {
+        const target = enemies[0];
+        entity.moveTo(target.x, target.y, 1.3);
+        
+        if (entity.distanceTo(target) < 20) {
+            const damage = 0.4 * entity.brain.genes.aggression;
+            target.energy -= damage;
+            entity.energy -= 0.15;
+            
+            if (Math.random() < 0.3) {
+                communicate(entity, 'alert', '⚠', signals);
+            }
+        }
+    }
+}
+
+function seekMate(entity, entities) {
+    if (entity.energy < 70 || entity.reproductionCooldown > 0) return;
+    
+    const range = 180 * (1 + entity.brain.genes.socialDistance);
+    const mates = entities.filter(e => 
+        e !== entity && 
+        e.energy > 70 && 
+        e.reproductionCooldown === 0 &&
+        entity.distanceTo(e) < range
+    );
+    
+    if (mates.length > 0) {
+        const mate = mates[0];
+        entity.moveTo(mate.x, mate.y, 0.9);
+        
+        if (entity.distanceTo(mate) < 25 && Math.random() < 0.1) {
+            communicate(entity, 'mate', '❤', signals);
+            
+            // Try to reproduce
+            if (Math.random() < 0.05) {
+                reproduce(entity, mate);
+            }
+        }
+    }
+}
+
+function socialize(entity, entities) {
+    const allies = entities.filter(e => 
+        e.society === entity.society && 
+        e !== entity && 
+        entity.distanceTo(e) < 200
+    );
+    
+    if (allies.length > 0) {
+        const target = allies[Math.floor(Math.random() * allies.length)];
+        const targetDist = 60 * entity.brain.genes.socialDistance;
+        const currentDist = entity.distanceTo(target);
+        
+        if (currentDist > targetDist + 20) {
+            entity.moveTo(target.x, target.y, 0.6);
+        } else if (currentDist < targetDist - 20) {
+            const dx = entity.x - target.x;
+            const dy = entity.y - target.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist > 0) {
+                entity.vx += (dx / dist) * 0.3;
+                entity.vy += (dy / dist) * 0.3;
+            }
+        }
+    }
+}
+
+function wander(entity) {
+    if (Math.random() < 0.03) {
+        entity.vx = (Math.random() - 0.5) * 0.6;
+        entity.vy = (Math.random() - 0.5) * 0.6;
+    }
+}
+
+function communicate(entity, type, message, signals) {
+    if (entity.communicationCooldown > 0) return;
+    if (entity.brain.genes.communication < 0.3) return;
+    
+    signals.push(new Signal(entity.x, entity.y, type, message));
+    entity.communicationCooldown = 5;
+}
+
+function reproduce(parent1, parent2) {
+    if (parent1.reproductionCooldown > 0 || parent2.reproductionCooldown > 0) return;
+    if (parent1.energy < 70 || parent2.energy < 70) return;
+    
+    parent1.energy -= 30;
+    parent2.energy -= 30;
+    parent1.reproductionCooldown = 12;
+    parent2.reproductionCooldown = 12;
+    
+    const x = (parent1.x + parent2.x) / 2;
+    const y = (parent1.y + parent2.y) / 2;
+    
+    let childSociety;
+    if (parent1.society === parent2.society) {
+        childSociety = parent1.society;
+    } else {
+        childSociety = Math.random() < 0.5 ? parent1.society : parent2.society;
+    }
+    
+    const generation = Math.max(parent1.generation, parent2.generation) + 1;
+    maxGeneration = Math.max(maxGeneration, generation);
+    
+    const child = new Entity(
+        x + (Math.random() - 0.5) * 40, 
+        y + (Math.random() - 0.5) * 40, 
+        childSociety,
+        parent1,
+        parent2,
+        generation
+    );
+    child.id = entityIdCounter++;
+    child.energy = 80;
+    entities.push(child);
+    
+    // Notify backend of reproduction
+    if (backend) {
+        backend.reproduceEntities(parent1, parent2, child.id);
+    }
+}
+
+// Mouse interaction
+canvas.addEventListener('click', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const mouseX = e.clientX - rect.left;
+    const mouseY = e.clientY - rect.top;
+    
+    const worldX = (mouseX - canvas.width / 2) / camera.zoom + camera.x;
+    const worldY = (mouseY - canvas.height / 2) / camera.zoom + camera.y;
+    
+    selectedEntity = null;
+    let minDist = 20 / camera.zoom;
+    
+    for (let entity of entities) {
+        const dist = Math.sqrt((entity.x - worldX) ** 2 + (entity.y - worldY) ** 2);
+        if (dist < minDist) {
+            selectedEntity = entity;
+            minDist = dist;
+        }
+    }
+});
+
+canvas.addEventListener('mousemove', (e) => {
+    if (selectedEntity) {
+        const rect = canvas.getBoundingClientRect();
+        const infoDiv = document.getElementById('entityInfo');
+        infoDiv.style.left = (e.clientX + 15) + 'px';
+        infoDiv.style.top = (e.clientY + 15) + 'px';
+        infoDiv.style.display = 'block';
+        
+        const genes = selectedEntity.brain.genes;
+        let html = `
+            <div style="color: ${selectedEntity.society.color}; font-weight: bold; margin-bottom: 8px;">
+                ${selectedEntity.society.name} #${selectedEntity.id}
+            </div>
+            <div style="font-size: 10px; margin-bottom: 5px;">
+                Gen: ${selectedEntity.generation} | Age: ${selectedEntity.age.toFixed(1)}s<br>
+                Energy: ${selectedEntity.energy.toFixed(1)} | Children: ${selectedEntity.children.length}
+                ${selectedEntity.isHybrid ? '<br><span style="color: #ffff00;">⚡ HYBRID</span>' : ''}
+                ${selectedEntity.lastMeal ? `<br>Last meal: ${selectedEntity.lastMeal}` : ''}
+            </div>
+            <div style="font-size: 9px; margin-top: 8px;">
+                <b>Genetic Traits:</b><br>
+        `;
+        
+        for (let [trait, value] of Object.entries(genes)) {
+            const percent = (value * 100).toFixed(0);
+            html += `
+                ${trait}: ${percent}%
+                <div class="trait-bar">
+                    <div class="trait-fill" style="width: ${percent}%"></div>
+                </div>
+            `;
+        }
+        
+        if (selectedEntity.parent1) {
+            html += `<br><b>Parents:</b> #${selectedEntity.parent1.id}`;
+            if (selectedEntity.parent2) {
+                html += ` & #${selectedEntity.parent2.id}`;
+            }
+        }
+        
+        html += `</div>`;
+        infoDiv.innerHTML = html;
+    } else {
+        document.getElementById('entityInfo').style.display = 'none';
+    }
+});
+
+// Controls
+const keys = {};
+window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    if (e.key === ' ') {
+        e.preventDefault();
+        isPaused = !isPaused;
+    }
+});
+window.addEventListener('keyup', (e) => keys[e.key] = false);
+
+canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    camera.zoom = Math.max(0.3, Math.min(2.5, camera.zoom + (e.deltaY < 0 ? 0.1 : -0.1)));
+});
+
+document.getElementById('restart').addEventListener('click', initWorld);
+
+let speedLevel = 0;
+const speeds = [1, 2, 5, 10];
+document.getElementById('speedUp').addEventListener('click', function() {
+    speedLevel = (speedLevel + 1) % speeds.length;
+    timeSpeed = speeds[speedLevel];
+    this.textContent = `Speed: ${timeSpeed}x`;
+});
+
+function updateCamera() {
+    const speed = 8 / camera.zoom;
+    if (keys['w'] || keys['ArrowUp']) camera.y -= speed;
+    if (keys['s'] || keys['ArrowDown']) camera.y += speed;
+    if (keys['a'] || keys['ArrowLeft']) camera.x -= speed;
+    if (keys['d'] || keys['ArrowRight']) camera.x += speed;
+}
+
+function update() {
+    const now = Date.now();
+    let deltaTime = Math.min((now - lastTime) / 1000, 0.1);
+    lastTime = now;
+    
+    if (!isPaused) {
+        deltaTime *= timeSpeed;
+        simulationTime += deltaTime;
+        
+        // Update signals
+        const activeSignals = [];
+        for (let signal of signals) {
+            if (signal.update(deltaTime)) {
+                activeSignals.push(signal);
+            }
+        }
+        signals.length = 0;
+        signals.push(...activeSignals);
+        
+        // Update entities
+        updateEntities(deltaTime);
+        
+        // Reproduction check
+        const checkedPairs = new Set();
+        for (let i = 0; i < entities.length; i++) {
+            for (let j = i + 1; j < entities.length; j++) {
+                const e1 = entities[i];
+                const e2 = entities[j];
+                const pairKey = `${Math.min(e1.id, e2.id)}-${Math.max(e1.id, e2.id)}`;
+                
+                if (!checkedPairs.has(pairKey) && 
+                    e1.distanceTo(e2) < 30 &&
+                    e1.energy > 70 && e2.energy > 70 &&
+                    e1.reproductionCooldown === 0 && e2.reproductionCooldown === 0) {
+                    reproduce(e1, e2);
+                    checkedPairs.add(pairKey);
+                }
+            }
+        }
+        
+        // Respawn resources in territories
+        for (let society of Object.values(societies)) {
+            const t = society.territory;
+            const foodInTerritory = resources.filter(r => 
+                r.x >= t.x && r.x <= t.x + t.width &&
+                r.y >= t.y && r.y <= t.y + t.height &&
+                r.amount > 0
+            ).length;
+            
+            if (foodInTerritory < 20 && Math.random() < 0.2 * timeSpeed) {
+                const foodType = Math.random() < 0.7 ? society.preferredFood[0] : 'universal';
+                resources.push(new Resource(
+                    t.x + Math.random() * t.width,
+                    t.y + Math.random() * t.height,
+                    foodType
+                ));
+            }
+        }
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#f5f5f5';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    ctx.save();
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.translate(-camera.x, -camera.y);
+    
+    // Draw territories with environment effects
+    for (let society of Object.values(societies)) {
+        const t = society.territory;
+        
+        // Environment background
+        const envColors = {
+            'Volcanic Wasteland': 'rgba(255, 100, 50, 0.08)',
+            'Lush Gardens': 'rgba(100, 255, 150, 0.08)',
+            'Crystal Caverns': 'rgba(150, 255, 200, 0.08)'
+        };
+        
+        ctx.fillStyle = envColors[society.environment.name];
+        ctx.fillRect(t.x, t.y, t.width, t.height);
+        
+        ctx.strokeStyle = society.color + '40';
+        ctx.lineWidth = 3 / camera.zoom;
+        ctx.strokeRect(t.x, t.y, t.width, t.height);
+        
+        // Territory label
+        ctx.fillStyle = society.color;
+        ctx.font = `bold ${20 / camera.zoom}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.fillText(society.name, t.x + t.width / 2, t.y - 20 / camera.zoom);
+        
+        // Environment info
+        ctx.font = `${12 / camera.zoom}px Arial`;
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+        ctx.fillText(society.environment.name, t.x + t.width / 2, t.y - 5 / camera.zoom);
+    }
+    
+    // Draw resources
+    for (let resource of resources) {
+        resource.draw(ctx, camera);
+    }
+    
+    // Draw communication signals
+    for (let signal of signals) {
+        signal.draw(ctx, camera);
+    }
+    
+    // Draw entities
+    for (let entity of entities) {
+        entity.draw(ctx, camera);
+        
+        if (entity === selectedEntity) {
+            ctx.strokeStyle = '#ffff00';
+            ctx.lineWidth = 3 / camera.zoom;
+            ctx.beginPath();
+            ctx.arc(entity.x, entity.y, 18 / camera.zoom, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+    }
+    
+    ctx.restore();
+    
+    // Update UI
+    const minutes = Math.floor(simulationTime / 60);
+    const seconds = Math.floor(simulationTime % 60);
+    document.getElementById('timer').textContent = 
+        `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    document.getElementById('generation').textContent = 
+        `Max Generation: ${maxGeneration} | Total: ${entities.length}`;
+    
+    // Stats
+    let statsHTML = '<div style="font-size: 13px; font-weight: bold; margin-bottom: 10px;">SOCIETIES</div>';
+    for (let society of Object.values(societies)) {
+        const pop = entities.filter(e => e.society === society);
+        const hybrids = pop.filter(e => e.isHybrid).length;
+        const avgGen = pop.length > 0 ? (pop.reduce((sum, e) => sum + e.generation, 0) / pop.length).toFixed(1) : 0;
+        const avgEnergy = pop.length > 0 ? (pop.reduce((sum, e) => sum + e.energy, 0) / pop.length).toFixed(1) : 0;
+        const children = pop.reduce((sum, e) => sum + e.children.length, 0);
+        
+        statsHTML += `
+            <div class="society">
+                <div class="society-name" style="color: ${society.color}">${society.name}</div>
+                <div class="stat">Pop: ${pop.length} (${hybrids} hybrids)</div>
+                <div class="stat">Avg Gen: ${avgGen} | Avg Energy: ${avgEnergy}</div>
+                <div class="stat">Children: ${children}</div>
+                <div class="stat" style="font-size: 9px; opacity: 0.7; margin-top: 3px;">
+                    ${society.environment.name}<br>
+                    Diet: ${society.preferredFood.join(', ')}
+                </div>
+            </div>
+        `;
+    }
+    document.getElementById('stats').innerHTML = statsHTML;
+}
+
+function gameLoop() {
+    updateCamera();
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+// Initialize
+initBackend();
+initWorld().then(() => {
+    gameLoop();
+}).catch(error => {
+    console.error('Error initializing world:', error);
+    gameLoop(); // Start anyway with empty world
+});
+

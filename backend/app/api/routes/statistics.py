@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.services.statistics_service import StatisticsService
+from app.services.statistics_services import StatisticsService
 
 router = APIRouter()
 stats_service = StatisticsService()

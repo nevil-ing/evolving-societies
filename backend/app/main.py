@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.api.routes import entities, simulation, statistics, world
 from app.api.websocket import router as websocket_router
+from app.services.entity_service import EntityService
 
 app = FastAPI(
     title="Evolving Societies API",
@@ -26,12 +27,17 @@ app.include_router(statistics.router, prefix="/api/statistics", tags=["statistic
 app.include_router(world.router, prefix="/api/world", tags=["world"])
 app.include_router(websocket_router)
 
+entity_service = EntityService()
+
 @app.get("/")
 async def root():
+    entity_ids = entity_service.get_all_entity_ids()
     return {
-        "message": "Evolving Societies API",
+        "message": "Evolving Societies Simulation API",
         "version": "0.1.0",
-        "status": "running"
+        "status": "running",
+        "entities": len(entity_ids),
+        "generation": 1
     }
 
 @app.get("/health")

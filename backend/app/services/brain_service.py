@@ -25,13 +25,38 @@ class BrainService:
         with torch.no_grad():
             decision_probs = brain(input_tensor).squeeze().numpy()
         
-        consequences = self.decision_engine.predict_consequences(state, decision_probs)
+        # Get the action with highest probability
+        action_index = np.argmax(decision_probs)
+        
+        # Map action index to action type
+        # 0: wander, 1: gather, 2: fight, 3: mate, 4: socialize, 5-9: reserved
+        action_types = ['wander', 'gather', 'fight', 'mate', 'socialize']
+        action_type = action_types[min(action_index, len(action_types) - 1)]
+        
+        # Create action based on state and action type
+        action = {
+            'type': action_type,
+            'vx': 0.0,
+            'vy': 0.0
+        }
+        
+        # Set target coordinates based on action type and state
+        if action_type == 'gather' and 'nearby_food' in state and state.get('nearby_food', 0) > 0:
+            # Will be handled by frontend based on nearest food
+            action['target_x'] = state.get('food_x', 0)
+            action['target_y'] = state.get('food_y', 0)
+        elif action_type == 'fight' and 'nearby_enemies' in state and state.get('nearby_enemies', 0) > 0:
+            action['target_x'] = state.get('enemy_x', 0)
+            action['target_y'] = state.get('enemy_y', 0)
+        elif action_type == 'mate' and 'nearby_allies' in state and state.get('nearby_allies', 0) > 0:
+            action['target_x'] = state.get('ally_x', 0)
+            action['target_y'] = state.get('ally_y', 0)
         
         return {
             'type': 'decision_result',
             'entity_id': entity_id,
-            'action_probabilities': decision_probs.tolist(),
-            'consequences': consequences
+            'action': action,
+            'action_probabilities': decision_probs.tolist()
         }
     
     async def reproduce(self, parent1_id: int, parent2_id: int, child_id: int):

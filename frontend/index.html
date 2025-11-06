@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Evolving Societies</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    
+    <div class="timer">
+        <div class="time-display" id="timer">0:00</div>
+        <div class="gen-display" id="generation">Generation: 1 | Population: 0</div>
+        <div class="connection-status" id="connectionStatus" style="font-size: 10px; margin-top: 5px; color: #ff4444;">Disconnected</div>
+    </div>
+    
+    <div class="info" id="stats"></div>
+    
+    <div class="entity-info" id="entityInfo"></div>
+    
+    <div class="legend">
+        <div style="font-weight: bold; margin-bottom: 5px;">RESOURCES</div>
+        <div class="legend-item"><div class="legend-dot" style="background: #ff6b6b;"></div>Meat (Triangles)</div>
+        <div class="legend-item"><div class="legend-dot" style="background: #4ecdc4;"></div>Plants (Circles)</div>
+        <div class="legend-item"><div class="legend-dot" style="background: #95e1d3;"></div>Minerals (Squares)</div>
+        <div class="legend-item"><div class="legend-dot" style="background: #ffeb3b;"></div>Universal</div>
+    </div>
+    
+    <div class="controls">
+        <div><span class="key">WASD</span> Move | <span class="key">Wheel</span> Zoom | <span class="key">Space</span> Pause</div>
+        <div><span class="key">Click</span> entity for info</div>
+        <button id="restart">Restart</button>
+        <button id="speedUp">Speed: 1x</button>
+    </div>
+
+    <script src="js/communication.js"></script>
+    <script src="js/entities.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>
+
