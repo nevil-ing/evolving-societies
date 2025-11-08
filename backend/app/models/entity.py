@@ -12,6 +12,7 @@ class GeneticTraits(BaseModel):
     communication: float = 0.5
     adaptability: float = 0.5
     territoriality: float = 0.5
+    
 
 class EntityResponse(BaseModel):
     id: int
@@ -21,6 +22,7 @@ class EntityResponse(BaseModel):
     society: str
     is_hybrid: bool
     children_count: int
+    
 
 class EntityState(BaseModel):
     """Current state of an entity in the simulation."""
