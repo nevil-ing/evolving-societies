@@ -46,7 +46,7 @@ TRIANGLES = Society(
     territory=Territory(x=-600, y=-400, width=500, height=400),
     environment=Environment(
         name="Volcanic Wasteland",
-        harshness=0.5,
+        harshness=0.6,
         description="Hot, aggressive, resource-scarce"
     ),
     preferred_food=["meat", "universal"],
@@ -67,7 +67,8 @@ CIRCLES = Society(
     ),
     preferred_food=["plant", "universal"],
     culture="Peaceful gatherers living in harmony",
-    base_lifespan=110.0,
+    #economic_activity=""
+    base_lifespan=85,
     starting_population=20
 )
 
@@ -83,7 +84,9 @@ SQUARES = Society(
     ),
     preferred_food=["mineral", "universal"],
     culture="Methodical builders focused on efficiency",
-    base_lifespan=100.0,
+    #economic=""
+    #infastructure=""
+    base_lifespan=80,
     starting_population=20
 )
 

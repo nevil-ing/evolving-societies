@@ -6,7 +6,7 @@ from app.models.entity import EntityState
 class Resource(BaseModel):
     """A resource that entities can gather."""
     id: int
-    type: str  # e.g., "meat", "plants", "universal"
+    type: str  
     x: float
     y: float
     resource_type: str  

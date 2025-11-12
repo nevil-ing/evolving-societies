@@ -11,17 +11,17 @@ class StatisticsService:
         return {
             "total_population": len(entities),
             "total_generations": self._calculate_max_generation(entities),
-            # Add more stats
+            
         }
     
     def get_society_breakdown(self) -> dict:
         """Get statistics per society"""
-        # Implementation
+        
         pass
     
     def get_evolution_metrics(self) -> dict:
         """Get evolution metrics over time"""
-        # Implementation
+        
         pass
     
     def _calculate_max_generation(self, entities: dict) -> int:

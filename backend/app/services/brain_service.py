@@ -29,11 +29,10 @@ class BrainService:
         action_index = np.argmax(decision_probs)
         
         # Map action index to action type
-        # 0: wander, 1: gather, 2: fight, 3: mate, 4: socialize, 5-9: reserved
         action_types = ['wander', 'gather', 'fight', 'mate', 'socialize']
         action_type = action_types[min(action_index, len(action_types) - 1)]
         
-        # Create action based on state and action type
+        #action based on state and action type
         action = {
             'type': action_type,
             'vx': 0.0,
@@ -42,7 +41,7 @@ class BrainService:
         
         # Set target coordinates based on action type and state
         if action_type == 'gather' and 'nearby_food' in state and state.get('nearby_food', 0) > 0:
-            # Will be handled by frontend based on nearest food
+            
             action['target_x'] = state.get('food_x', 0)
             action['target_y'] = state.get('food_y', 0)
         elif action_type == 'fight' and 'nearby_enemies' in state and state.get('nearby_enemies', 0) > 0:

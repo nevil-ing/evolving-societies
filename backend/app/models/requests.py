@@ -28,4 +28,4 @@ class LoadWorldRequest(BaseModel):
     filename: str
 
 class SimulationControlRequest(BaseModel):
-    action: str  # "start", "pause", "reset"
+    action: str  
