@@ -3,40 +3,23 @@ import torch.nn as nn
 import numpy as np
 
 class EntityBrain(nn.Module):
-    """
-    Advanced neural brain for entities in an evolving artificial society.
-
-    INPUT (10 numbers):
-        0. Energy (0-1)
-        1. Age normalized (0-1)
-        2. Nearby food count (0-1)
-        3. Nearby enemies count (0-1)
-        4. Nearby allies count (0-1)
-        5-9. Top 5 genetic traits
-
-    OUTPUT (5 actions - probabilities):
-        0. Gather food
-        1. Fight enemy
-        2. Reproduce
-        3. Socialize
-        4. Wander
-    """
+    """Neural network model for entity decision making."""
 
     def __init__(self):
         super(EntityBrain, self).__init__()
 
-        # Deep neural architecture
-        self.fc1 = nn.Linear(10, 128)     # Input → Dense expansion
+        
+        self.fc1 = nn.Linear(10, 128)     
         self.ln1 = nn.LayerNorm(128)
-        self.fc2 = nn.Linear(128, 256)    # 1st hidden
+        self.fc2 = nn.Linear(128, 256)    
         self.ln2 = nn.LayerNorm(256)
-        self.fc3 = nn.Linear(256, 512)    # 2nd hidden
+        self.fc3 = nn.Linear(256, 512)    
         self.ln3 = nn.LayerNorm(512)
-        self.fc4 = nn.Linear(512, 256)    # 3rd hidden
+        self.fc4 = nn.Linear(512, 256)    
         self.ln4 = nn.LayerNorm(256)
-        self.fc5 = nn.Linear(256, 128)    # 4th hidden (compression)
+        self.fc5 = nn.Linear(256, 128)    
         self.ln5 = nn.LayerNorm(128)
-        self.fc6 = nn.Linear(128, 5)      # Output layer (actions)
+        self.fc6 = nn.Linear(128, 5)      
 
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(p=0.2)
@@ -55,11 +38,6 @@ class EntityBrain(nn.Module):
         return x
 
     def mutate(self, mutation_rate: float = 0.1, mutation_strength: float = 0.05):
-        """
-        Introduce random mutations into weights to simulate biological variation.
-        Mutation rate: probability that a layer mutates.
-        Mutation strength: how strong the mutation effect is.
-        """
         with torch.no_grad():
             for param in self.parameters():
                 if np.random.random() < mutation_rate:
@@ -81,9 +59,4 @@ class EntityBrain(nn.Module):
                 child_param.copy_(torch.where(mask, p1_param, p2_param))
         return child
 
-# Example usage
-if __name__ == "__main__":
-    brain = EntityBrain()
-    x = torch.rand(1, 10)  # Example sensory input
-    output = brain(x)
-    print("Action probabilities:", output)
+
