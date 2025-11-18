@@ -9,21 +9,24 @@ class BrainService:
     def __init__(self):
         self.entity_brains: Dict[int, EntityBrain] = {}
         self.decision_engine = DecisionEngine()
-    
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+        print(f" Neural Engine Running on: {self.device}")
+
     async def process_decision(self, entity_id: int, inputs: list, state: dict):
         """Process entity decision using neural network"""
         if entity_id not in self.entity_brains:
-            self.entity_brains[entity_id] = EntityBrain(
+            brain = EntityBrain(
                 input_size=settings.NN_INPUT_SIZE,
                 hidden_size=settings.NN_HIDDEN_SIZE,
                 output_size=settings.NN_OUTPUT_SIZE
-            )
+            ).to(self.device)
+            self.entity_brains[entity_id] = brain
         
         brain = self.entity_brains[entity_id]
         input_tensor = torch.FloatTensor(inputs).unsqueeze(0)
         
         with torch.no_grad():
-            decision_probs = brain(input_tensor).squeeze().numpy()
+            decision_probs = brain(input_tensor).squeeze().cpu().numpy()
         
         # Get the action with highest probability
         action_index = np.argmax(decision_probs)
