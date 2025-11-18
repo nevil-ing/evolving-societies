@@ -5,11 +5,11 @@ import numpy as np
 class EntityBrain(nn.Module):
     """Neural network model for entity decision making."""
 
-    def __init__(self):
+    def __init__(self, input_size: int = 20, hidden_size: int = 64, output_size: int = 5):
         super(EntityBrain, self).__init__()
 
         
-        self.fc1 = nn.Linear(10, 128)     
+        self.fc1 = nn.Linear(input_size, 128)     
         self.ln1 = nn.LayerNorm(128)
         self.fc2 = nn.Linear(128, 256)    
         self.ln2 = nn.LayerNorm(256)
