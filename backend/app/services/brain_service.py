@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from typing import Dict
+from typing import Dict, Optional
 from app.core.neural_network import EntityBrain
 from app.core.decision_engine import DecisionEngine
 from app.config import settings
@@ -9,48 +9,72 @@ class BrainService:
     def __init__(self):
         self.entity_brains: Dict[int, EntityBrain] = {}
         self.decision_engine = DecisionEngine()
-        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-        print(f" Neural Engine Running on: {self.device}")
+        
+        # --- 1. DEVICE DETECTION (Fixes the M1/MPS Error) ---
+        if torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            print(f"BrainService: Running on M1 GPU (Metal/MPS)")
+        elif torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            print(f"🚀 BrainService: Running on CUDA GPU")
+        else:
+            self.device = torch.device("cpu")
+            print(f"⚠️ BrainService: Running on CPU (Slow)")
 
     async def process_decision(self, entity_id: int, inputs: list, state: dict):
         """Process entity decision using neural network"""
+        
+        # --- 2. INITIALIZATION ON GPU ---
         if entity_id not in self.entity_brains:
+            # Initialize brain using settings dimensions
             brain = EntityBrain(
-                input_size=settings.NN_INPUT_SIZE,
+                input_size=settings.NN_INPUT_SIZE,   # Matches JS inputs (20)
                 hidden_size=settings.NN_HIDDEN_SIZE,
                 output_size=settings.NN_OUTPUT_SIZE
-            ).to(self.device)
-            self.entity_brains[entity_id] = brain
+            )
+            # IMPORTANT: Move the new brain to the correct device immediately
+            self.entity_brains[entity_id] = brain.to(self.device)
         
         brain = self.entity_brains[entity_id]
-        input_tensor = torch.FloatTensor(inputs).unsqueeze(0)
+        
+        # --- 3. TENSOR DEVICE FIX ---
+        # Convert list to tensor and send to GPU (.to(self.device))
+        # This prevents the "Tensor for argument input is on cpu but expected on mps" error
+        input_tensor = torch.FloatTensor(inputs).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
-            decision_probs = brain(input_tensor).squeeze().cpu().numpy()
+            # Run inference
+            decision_tensor = brain(input_tensor).squeeze()
+            
+            # Move result back to CPU for NumPy processing (.cpu())
+            decision_probs = decision_tensor.cpu().numpy()
         
         # Get the action with highest probability
         action_index = np.argmax(decision_probs)
         
         # Map action index to action type
         action_types = ['wander', 'gather', 'fight', 'mate', 'socialize']
+        # Safety check to ensure index doesn't exceed list
         action_type = action_types[min(action_index, len(action_types) - 1)]
         
-        #action based on state and action type
+        # Initialize action response
         action = {
             'type': action_type,
             'vx': 0.0,
             'vy': 0.0
         }
         
-        # Set target coordinates based on action type and state
-        if action_type == 'gather' and 'nearby_food' in state and state.get('nearby_food', 0) > 0:
-            
+        # Set target coordinates based on action type and available state info
+        # This allows the Python brain to tell the JS body where to go
+        if action_type == 'gather' and state.get('nearby_food', 0) > 0:
             action['target_x'] = state.get('food_x', 0)
             action['target_y'] = state.get('food_y', 0)
-        elif action_type == 'fight' and 'nearby_enemies' in state and state.get('nearby_enemies', 0) > 0:
+            
+        elif action_type == 'fight' and state.get('nearby_enemies', 0) > 0:
             action['target_x'] = state.get('enemy_x', 0)
             action['target_y'] = state.get('enemy_y', 0)
-        elif action_type == 'mate' and 'nearby_allies' in state and state.get('nearby_allies', 0) > 0:
+            
+        elif action_type == 'mate' and state.get('nearby_allies', 0) > 0:
             action['target_x'] = state.get('ally_x', 0)
             action['target_y'] = state.get('ally_y', 0)
         
@@ -74,10 +98,15 @@ class BrainService:
         parent1 = self.entity_brains[parent1_id]
         parent2 = self.entity_brains[parent2_id]
         
+        # Perform crossover (this happens on whatever device parents are on)
         child = EntityBrain.crossover(parent1, parent2)
+        
+        # Mutate weights
         child.mutate(mutation_rate=settings.MUTATION_RATE)
         
-        self.entity_brains[child_id] = child
+        # --- 4. CHILD DEVICE FIX ---
+        # Ensure the new child is explicitly moved to the accelerator
+        self.entity_brains[child_id] = child.to(self.device)
         
         return {
             'type': 'child_created',
@@ -85,11 +114,12 @@ class BrainService:
             'success': True
         }
     
-    def get_brain(self, entity_id: int) -> EntityBrain:
+    def get_brain(self, entity_id: int) -> Optional[EntityBrain]:
         """Get brain for entity"""
         return self.entity_brains.get(entity_id)
     
     def remove_brain(self, entity_id: int):
-        """Remove brain"""
+        """Remove brain to free up memory"""
         if entity_id in self.entity_brains:
             del self.entity_brains[entity_id]
+            # Force GPU cache clear occasionally if needed, though usually automatic

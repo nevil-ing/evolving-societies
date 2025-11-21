@@ -1,3 +1,71 @@
+// Societies configuration
+const societies = {
+    triangles: {
+        name: 'Triangles',
+        color: '#ff4444',
+        territory: { x: -600, y: -400, width: 500, height: 400 },
+        environment: {
+            name: 'Volcanic Wasteland',
+            harshness: 0.5,
+            description: 'Hot, aggressive, resource-scarce'
+        },
+        preferredFood: ['meat', 'universal'],
+        culture: 'Warrior hunters who thrive on conflict',
+        drawShape: (ctx, size, health) => {
+            ctx.fillStyle = `rgba(255, 68, 68, ${health * 0.7 + 0.3})`;
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, -size);
+            ctx.lineTo(-size, size);
+            ctx.lineTo(size, size);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+        }
+    },
+    circles: {
+        name: 'Circles',
+        color: '#4444ff',
+        territory: { x: 100, y: -400, width: 500, height: 400 },
+        environment: {
+            name: 'Lush Gardens',
+            harshness: 0.1,
+            description: 'Peaceful, abundant vegetation'
+        },
+        preferredFood: ['plant', 'universal'],
+        culture: 'Peaceful gatherers living in harmony',
+        drawShape: (ctx, size, health) => {
+            ctx.fillStyle = `rgba(68, 68, 255, ${health * 0.7 + 0.3})`;
+            ctx.strokeStyle = '#0000ff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(0, 0, size, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.stroke();
+        }
+    },
+    squares: {
+        name: 'Squares',
+        color: '#44ff44',
+        territory: { x: -250, y: 50, width: 500, height: 400 },
+        environment: {
+            name: 'Crystal Caverns',
+            harshness: 0.3,
+            description: 'Rich in minerals, stable climate'
+        },
+        preferredFood: ['mineral', 'universal'],
+        culture: 'Methodical builders focused on efficiency',
+        drawShape: (ctx, size, health) => {
+            ctx.fillStyle = `rgba(68, 255, 68, ${health * 0.7 + 0.3})`;
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            ctx.fillRect(-size, -size, size * 2, size * 2);
+            ctx.strokeRect(-size, -size, size * 2, size * 2);
+        }
+    }
+};
+
 // Backend API URL
 const API_BASE_URL = 'http://localhost:8000';
 const WS_URL = 'ws://localhost:8000/ws';
@@ -43,31 +111,27 @@ function initBackend() {
         updateConnectionStatus(true);
     });
     
-    backend.on('decision_result', (data) => {
-        // Handle decision results from backend
-        const entity = entities.find(e => e.id === data.entity_id);
-        if (entity && data.action) {
-            // Apply action from backend
-            applyAction(entity, data.action);
-        }
-    });
+    // Note: 'decision_result' is now handled via Promises in the update loop,
+    // but we keep this listener just in case specific global events are needed.
     
     backend.on('child_created', (data) => {
-        // Handle reproduction result
-        console.log('Child created:', data);
+        console.log('Child created via Backend Genetics:', data);
     });
 }
 
 function updateConnectionStatus(connected) {
     const statusEl = document.getElementById('connectionStatus');
     if (statusEl) {
-        statusEl.textContent = connected ? 'Connected' : 'Disconnected';
+        statusEl.textContent = connected ? 'Connected (Neural Engine Active)' : 'Disconnected';
         statusEl.style.color = connected ? '#00ff00' : '#ff4444';
     }
 }
 
 function applyAction(entity, action) {
     // Apply action from neural network decision
+    // This function needs to run every frame to keep the entity moving towards its target
+    if (!action) return;
+
     if (action.type === 'move') {
         entity.vx = action.vx || 0;
         entity.vy = action.vy || 0;
@@ -77,6 +141,12 @@ function applyAction(entity, action) {
         entity.moveTo(action.target_x, action.target_y, 1.3);
     } else if (action.type === 'mate') {
         entity.moveTo(action.target_x, action.target_y, 0.9);
+    } else if (action.type === 'wander') {
+        // Gentle wandering if no target
+        if (Math.random() < 0.05) {
+            entity.vx += (Math.random() - 0.5) * 0.5;
+            entity.vy += (Math.random() - 0.5) * 0.5;
+        }
     }
 }
 
@@ -161,7 +231,7 @@ async function initWorld() {
     }
 }
 
-// Update entities
+// Update entities 
 function updateEntities(deltaTime) {
     const newEntities = [];
     
@@ -185,32 +255,48 @@ function updateEntities(deltaTime) {
         
         entity.energy = Math.min(150, entity.energy);
         
-        // Get decision from backend if connected
-        if (backend && backend.ws && backend.ws.readyState === WebSocket.OPEN) {
-            // Use backend for AI decisions
-            backend.getEntityDecision(entity, entities, resources).then(result => {
-                if (result && result.action) {
-                    applyAction(entity, result.action);
-                }
-            }).catch(err => {
-                // Fallback to local AI if backend fails
+        entity.decisionTimer -= deltaTime;
+
+        
+        if (entity.decisionTimer <= 0) {
+            entity.decisionTimer = 0.3 + Math.random() * 0.5;
+
+            if (backend && backend.ws && backend.ws.readyState === WebSocket.OPEN) {
+            
+                backend.getEntityDecision(entity, entities, resources).then(result => {
+                    if (result && result.action) {
+                        // Store the decision 
+                        entity.currentAction = result.action;
+                    }
+                }).catch(err => {
+                    // If request fails, default to local AI
+                    localAI(entity, entities, resources, signals);
+                });
+            } else {
+            
                 localAI(entity, entities, resources, signals);
-            });
-        } else {
-            // Fallback to local AI
-            localAI(entity, entities, resources, signals);
+            }
+        }
+
+        if (entity.currentAction) {
+            applyAction(entity, entity.currentAction);
+        } else if (!backend || backend.ws.readyState !== WebSocket.OPEN) {
+             
         }
         
+        
+
         // Move with speed influenced by diet
         const speedBonus = 1 + entity.dietBonus * 0.3;
         const speed = 10 * (0.5 + entity.brain.genes.speed * 0.5) * speedBonus;
         entity.x += entity.vx * deltaTime * speed;
         entity.y += entity.vy * deltaTime * speed;
         
+        // Friction
         entity.vx *= 0.95;
         entity.vy *= 0.95;
         
-        // Stay in or near territory
+        // Stay in or near territory (Soft boundaries)
         const territory = entity.society.territory;
         const margin = 100;
         if (entity.x < territory.x - margin) entity.vx += 0.5;
@@ -218,7 +304,7 @@ function updateEntities(deltaTime) {
         if (entity.y < territory.y - margin) entity.vy += 0.5;
         if (entity.y > territory.y + territory.height + margin) entity.vy -= 0.5;
         
-        // Check for resource gathering
+        // Check for resource gathering (Collision detection)
         for (let resource of resources) {
             if (resource.amount > 0 && entity.canEatResource(resource)) {
                 const dist = entity.distanceTo(resource);
@@ -259,7 +345,7 @@ function getResourceValue(entity, resource) {
     return value;
 }
 
-// Local AI fallback
+// Local AI fallback (Used when Backend is disconnected or between frames)
 function localAI(entity, entities, resources, signals) {
     const nearbyFood = resources.filter(r => {
         if (r.amount <= 0) return false;
@@ -275,19 +361,29 @@ function localAI(entity, entities, resources, signals) {
         e.society !== entity.society && entity.distanceTo(e) < 150
     ).length;
     
-    // Priority system
+    // Logic determines intended action, then sets entity.currentAction implicitly 
+    // by calling helper functions that set vx/vy or targets.
+    // To make this compatible with the new system, we should ideally update entity.currentAction
+    // but since localAI calls 'gatherResources' which calls 'moveTo', it works directly on Physics.
+    
     if (entity.energy < 40) {
         gatherResources(entity, resources, signals);
+        entity.currentAction = { type: 'gather' }; 
     } else if (nearbyEnemies > 0 && entity.brain.genes.aggression > 0.4) {
         fight(entity, entities, signals);
+        entity.currentAction = { type: 'fight' };
     } else if (entity.energy > 80 && entity.reproductionCooldown === 0) {
         seekMate(entity, entities);
+        entity.currentAction = { type: 'mate' };
     } else if (nearbyFood > 0 && entity.energy < 90) {
         gatherResources(entity, resources, signals);
+        entity.currentAction = { type: 'gather' };
     } else if (entity.brain.genes.cooperation > 0.5) {
         socialize(entity, entities);
+        entity.currentAction = { type: 'socialize' };
     } else {
         wander(entity);
+        entity.currentAction = { type: 'wander' };
     }
 }
 
@@ -433,7 +529,7 @@ function reproduce(parent1, parent2) {
     child.energy = 80;
     entities.push(child);
     
-    // Notify backend of reproduction
+    // Notify backend of reproduction (Send genetics to Python for Mixing)
     if (backend) {
         backend.reproduceEntities(parent1, parent2, child.id);
     }
@@ -478,6 +574,7 @@ canvas.addEventListener('mousemove', (e) => {
                 Energy: ${selectedEntity.energy.toFixed(1)} | Children: ${selectedEntity.children.length}
                 ${selectedEntity.isHybrid ? '<br><span style="color: #ffff00;">⚡ HYBRID</span>' : ''}
                 ${selectedEntity.lastMeal ? `<br>Last meal: ${selectedEntity.lastMeal}` : ''}
+                ${selectedEntity.currentAction ? `<br>Action: ${selectedEntity.currentAction.type}` : ''}
             </div>
             <div style="font-size: 9px; margin-top: 8px;">
                 <b>Genetic Traits:</b><br>
@@ -712,6 +809,5 @@ initWorld().then(() => {
     gameLoop();
 }).catch(error => {
     console.error('Error initializing world:', error);
-    gameLoop(); // Start anyway with empty world
+    gameLoop(); // Start with empty world
 });
-

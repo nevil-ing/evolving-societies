@@ -84,7 +84,7 @@ class Resource {
     }
 }
 
-// Neural Network class
+// Neural Network class (Client-side simplified version)
 class NeuralNetwork {
     constructor(parent1Genes, parent2Genes) {
         if (parent1Genes && parent2Genes) {
@@ -142,6 +142,13 @@ class Entity {
         this.communicationCooldown = 0;
         this.lastMeal = null;
         this.dietBonus = 0;
+
+        
+        // Initialize with random offset so they don't all ping server at once
+        this.decisionTimer = Math.random() * 1.0; 
+        // Store the last decision to persist action between server calls
+        this.currentAction = null;
+        
         
         if (parent1 && parent2) {
             this.brain = new NeuralNetwork(parent1.brain.genes, parent2.brain.genes);
@@ -214,72 +221,3 @@ class Entity {
         ctx.restore();
     }
 }
-
-// Societies configuration
-const societies = {
-    triangles: {
-        name: 'Triangles',
-        color: '#ff4444',
-        territory: { x: -600, y: -400, width: 500, height: 400 },
-        environment: {
-            name: 'Volcanic Wasteland',
-            harshness: 0.5,
-            description: 'Hot, aggressive, resource-scarce'
-        },
-        preferredFood: ['meat', 'universal'],
-        culture: 'Warrior hunters who thrive on conflict',
-        drawShape: (ctx, size, health) => {
-            ctx.fillStyle = `rgba(255, 68, 68, ${health * 0.7 + 0.3})`;
-            ctx.strokeStyle = '#ff0000';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.moveTo(0, -size);
-            ctx.lineTo(-size, size);
-            ctx.lineTo(size, size);
-            ctx.closePath();
-            ctx.fill();
-            ctx.stroke();
-        }
-    },
-    circles: {
-        name: 'Circles',
-        color: '#4444ff',
-        territory: { x: 100, y: -400, width: 500, height: 400 },
-        environment: {
-            name: 'Lush Gardens',
-            harshness: 0.1,
-            description: 'Peaceful, abundant vegetation'
-        },
-        preferredFood: ['plant', 'universal'],
-        culture: 'Peaceful gatherers living in harmony',
-        drawShape: (ctx, size, health) => {
-            ctx.fillStyle = `rgba(68, 68, 255, ${health * 0.7 + 0.3})`;
-            ctx.strokeStyle = '#0000ff';
-            ctx.lineWidth = 2;
-            ctx.beginPath();
-            ctx.arc(0, 0, size, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.stroke();
-        }
-    },
-    squares: {
-        name: 'Squares',
-        color: '#44ff44',
-        territory: { x: -250, y: 50, width: 500, height: 400 },
-        environment: {
-            name: 'Crystal Caverns',
-            harshness: 0.3,
-            description: 'Rich in minerals, stable climate'
-        },
-        preferredFood: ['mineral', 'universal'],
-        culture: 'Methodical builders focused on efficiency',
-        drawShape: (ctx, size, health) => {
-            ctx.fillStyle = `rgba(68, 255, 68, ${health * 0.7 + 0.3})`;
-            ctx.strokeStyle = '#00ff00';
-            ctx.lineWidth = 2;
-            ctx.fillRect(-size, -size, size * 2, size * 2);
-            ctx.strokeRect(-size, -size, size * 2, size * 2);
-        }
-    }
-};
-
