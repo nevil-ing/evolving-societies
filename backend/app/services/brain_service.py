@@ -10,21 +10,20 @@ class BrainService:
         self.entity_brains: Dict[int, EntityBrain] = {}
         self.decision_engine = DecisionEngine()
         
-        # --- 1. DEVICE DETECTION (Fixes the M1/MPS Error) ---
         if torch.backends.mps.is_available():
             self.device = torch.device("mps")
             print(f"BrainService: Running on M1 GPU (Metal/MPS)")
         elif torch.cuda.is_available():
             self.device = torch.device("cuda")
-            print(f"🚀 BrainService: Running on CUDA GPU")
+            print(f"BrainService: Running on CUDA GPU")
         else:
             self.device = torch.device("cpu")
-            print(f"⚠️ BrainService: Running on CPU (Slow)")
+            print(f"BrainService: Running on CPU (Slow)")
 
     async def process_decision(self, entity_id: int, inputs: list, state: dict):
         """Process entity decision using neural network"""
         
-        # --- 2. INITIALIZATION ON GPU ---
+        
         if entity_id not in self.entity_brains:
             # Initialize brain using settings dimensions
             brain = EntityBrain(
@@ -32,14 +31,11 @@ class BrainService:
                 hidden_size=settings.NN_HIDDEN_SIZE,
                 output_size=settings.NN_OUTPUT_SIZE
             )
-            # IMPORTANT: Move the new brain to the correct device immediately
+
             self.entity_brains[entity_id] = brain.to(self.device)
         
         brain = self.entity_brains[entity_id]
         
-        # --- 3. TENSOR DEVICE FIX ---
-        # Convert list to tensor and send to GPU (.to(self.device))
-        # This prevents the "Tensor for argument input is on cpu but expected on mps" error
         input_tensor = torch.FloatTensor(inputs).unsqueeze(0).to(self.device)
         
         with torch.no_grad():
@@ -54,18 +50,24 @@ class BrainService:
         
         # Map action index to action type
         action_types = ['wander', 'gather', 'fight', 'mate', 'socialize']
-        # Safety check to ensure index doesn't exceed list
+ 
         action_type = action_types[min(action_index, len(action_types) - 1)]
         
-        # Initialize action response
+        if action_type == 'gather' and state.get('nearby_food', 0) == 0:
+            action_type = 'wander'
+        if action_type == 'fight' and state.get('nearby_enemies', 0) == 0:
+            action_type = 'wander'
+        if action_type == 'mate' and state.get('nearby_allies', 0) == 0:
+            action_type = 'wander'
+                    
+        #action response
         action = {
             'type': action_type,
             'vx': 0.0,
             'vy': 0.0
         }
         
-        # Set target coordinates based on action type and available state info
-        # This allows the Python brain to tell the JS body where to go
+        
         if action_type == 'gather' and state.get('nearby_food', 0) > 0:
             action['target_x'] = state.get('food_x', 0)
             action['target_y'] = state.get('food_y', 0)

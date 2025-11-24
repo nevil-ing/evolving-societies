@@ -52,7 +52,7 @@ class BackendCommunication {
     
     async getEntityDecision(entity, entities, resources) {
         return new Promise((resolve) => {
-            // Prepare inputs for neural network (20 inputs total)
+            // inputs for neural network 
             const inputs = [
                 entity.energy / 100,
                 entity.age / 1000,
@@ -75,13 +75,58 @@ class BackendCommunication {
                 entity.reproductionCooldown / 20,
                 entity.communicationCooldown / 10
             ];
+            //find the nearest food resource coordinates
+            let foodX = 0;
+            let foodY = 0;
+            let minDist = Infinity;
             
+            //find the nearest enemies
+            let enemyX = 0;
+            let enemyY = 0;
+            let enemyDist = Infinity;
+            //find the nearest allies
+            let allyX = 0;
+            let allyY = 0;
+            let allyDist = Infinity;
+   
+        
+
+            //find the closest food to send to brain
+
+            for (let r of resources) {
+                if (r.amount > 0 && entity.canEatResource(r)) {
+                    const dist = entity.distanceTo(r);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        foodX = r.x;
+                        foodY = r.y;
+                    }
+                }
+            }
+            for (let e of entities) {
+                if (e.society !== entity.society) {
+                    const dist = entity.distanceTo(e);
+                    if (dist < enemyDist) {
+                        enemyDist = dist;
+                        enemyX = e.x;
+                        enemyY = e.y;
+                    }
+                } else if (e.society === entity.society && e !== entity) {
+                    const dist = entity.distanceTo(e);
+                    if (dist < allyDist) {
+                        allyDist = dist;
+                        allyX = e.x;
+                        allyY = e.y;
+                    }
+                }
+            }
+
             const messageId = `decision_${entity.id}_${Date.now()}`;
             
             const callback = (data) => {
                 if (data.entity_id === entity.id) {
                     resolve(data);
-                    // Remove callback after use
+                    
                     const callbacks = this.messageCallbacks.get('decision_result');
                     const index = callbacks.indexOf(callback);
                     if (index > -1) callbacks.splice(index, 1);
@@ -97,8 +142,14 @@ class BackendCommunication {
                 state: {
                     energy: entity.energy,
                     nearby_food: this.countNearbyFood(entity, resources),
+                    food_x: foodX,
+                    food_y: foodY,
                     nearby_enemies: this.countNearbyEnemies(entity, entities),
-                    nearby_allies: this.countNearbyAllies(entity, entities)
+                    enemy_x: enemyX,
+                    enemy_y: enemyY,
+                    nearby_allies: this.countNearbyAllies(entity, entities),
+                    ally_x: allyX,
+                    ally_y: allyY
                 }
             });
         });
