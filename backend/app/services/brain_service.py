@@ -18,7 +18,7 @@ class BrainService:
             print(f"BrainService: Running on CUDA GPU")
         else:
             self.device = torch.device("cpu")
-            print(f"BrainService: Running on CPU (Slow)")
+            print(f"BrainService: Running on CPU ")
 
     async def process_decision(self, entity_id: int, inputs: list, state: dict):
         """Process entity decision using neural network"""
@@ -106,7 +106,7 @@ class BrainService:
         # Mutate weights
         child.mutate(mutation_rate=settings.MUTATION_RATE)
         
-        # --- 4. CHILD DEVICE FIX ---
+        
         # Ensure the new child is explicitly moved to the accelerator
         self.entity_brains[child_id] = child.to(self.device)
         
@@ -124,4 +124,4 @@ class BrainService:
         """Remove brain to free up memory"""
         if entity_id in self.entity_brains:
             del self.entity_brains[entity_id]
-            # Force GPU cache clear occasionally if needed, though usually automatic
+            

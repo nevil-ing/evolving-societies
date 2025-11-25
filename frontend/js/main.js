@@ -171,7 +171,7 @@ async function initWorld() {
     
     // Create initial populations
     for (let society of Object.values(societies)) {
-        for (let i = 0; i < 25; i++) {
+        for (let i = 0; i < 5; i++) {
             const x = society.territory.x + Math.random() * society.territory.width;
             const y = society.territory.y + Math.random() * society.territory.height;
             const entity = new Entity(x, y, society);
@@ -211,7 +211,7 @@ async function initWorld() {
         }
         
         // Spawn some universal food
-        for (let i = 0; i < 10; i++) {
+        for (let i = 0; i < 100; i++) {
             resources.push(new Resource(
                 t.x + Math.random() * t.width,
                 t.y + Math.random() * t.height,
@@ -221,7 +221,7 @@ async function initWorld() {
     }
     
     // Add random resources
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 500; i++) {
         const types = ['meat', 'plant', 'mineral', 'universal'];
         resources.push(new Resource(
             Math.random() * 1600 - 800,
@@ -529,7 +529,7 @@ function reproduce(parent1, parent2) {
     child.energy = 80;
     entities.push(child);
     
-    // Notify backend of reproduction (Send genetics to Python for Mixing)
+    // Notify backend of reproduction 
     if (backend) {
         backend.reproduceEntities(parent1, parent2, child.id);
     }
