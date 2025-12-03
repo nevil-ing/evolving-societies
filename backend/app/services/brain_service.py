@@ -100,7 +100,7 @@ class BrainService:
         parent1 = self.entity_brains[parent1_id]
         parent2 = self.entity_brains[parent2_id]
         
-        # Perform crossover (this happens on whatever device parents are on)
+        # Perform crossover
         child = EntityBrain.crossover(parent1, parent2)
         
         # Mutate weights

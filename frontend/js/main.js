@@ -128,7 +128,6 @@ function updateConnectionStatus(connected) {
 }
 
 function applyAction(entity, action) {
-    // Apply action from neural network decision
     // This function needs to run every frame to keep the entity moving towards its target
     if (!action) return;
 
@@ -142,10 +141,21 @@ function applyAction(entity, action) {
     } else if (action.type === 'mate') {
         entity.moveTo(action.target_x, action.target_y, 0.9);
     } else if (action.type === 'wander') {
-        // Gentle wandering if no target
-        if (Math.random() < 0.05) {
-            entity.vx += (Math.random() - 0.5) * 0.5;
-            entity.vy += (Math.random() - 0.5) * 0.5;
+        
+        //continous movement for entitites not moving.
+        const currentSpeed = Math.sqrt(entity.vx * entity.vx + entity.vy * entity.vy);
+        if (currentSpeed < 0.4) {
+            const angle = Math.random() * Math.PI * 2;
+            entity.vx += Math.cos(angle) * 0.6;
+            entity.vy += Math.random(angle) * 0.6;
+        }else{
+            const turn = Math.random() < 0.05;
+            const vx = entity.vx;
+            const vy = entity.vy;
+
+            //rotate velocity vector slightly
+            entity.vx = vx * Math.cos(turn) - vy * Math.sin(0.1);
+            entity.vy = vx * Math.sin(turn) + vy * Math.cos(0.1);
         }
     }
 }
@@ -700,7 +710,7 @@ function update() {
 }
 
 function draw() {
-    ctx.fillStyle = '#f5f5f5';
+    ctx.fillStyle = '#0a0a12';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
     ctx.save();
@@ -708,11 +718,41 @@ function draw() {
     ctx.scale(camera.zoom, camera.zoom);
     ctx.translate(-camera.x, -camera.y);
     
-    // Draw territories with environment effects
+    //territories with environment effects
     for (let society of Object.values(societies)) {
         const t = society.territory;
-        
-        // Environment background
+        const centerX = t.x + t.width / 2;
+        const centerY = t.y + t.height / 2;
+        const radius = Math.max(t.width, t.height) * 0.8;
+
+        const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
+
+        if (society.name === "Triangles") {
+            gradient.addColorStop(0, 'rgba(60, 20, 20, 0.6)');
+            gradient.addColorStop(1, 'rgba(60, 20, 20, 0)');
+        } else if (society.name === "Circles") {
+            gradient.addColorStop(0, 'rgba(20, 60, 30, 0.6)');
+            gradient.addColorStop(1, 'rgba(20, 60, 20, 0)');
+        } else {//squares
+            gradient.addColorStop(0, 'rgba(20, 40, 60, 0.6)');
+            gradient.addColorStop(1, 'rgba(20, 40, 60, 0)');
+        }
+        //soft glow
+        ctx.fillStyle = gradient;
+        ctx.fillRect(t.x - 200, t.y - 200, t.width + 400, t.height + 400);
+
+        //faint border to show boundaries
+        ctx.strokeStyle = society.color;
+        ctx.globalAlpha = 0.2;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(t.x, t.y, t.width, t.height);
+        ctx.globalAlpha = 1.0;
+
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+        ctx.font = `bold ${30}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.fillText(society.name.toUpperCase(), centerX, centerY);
+                // Environment background
         const envColors = {
             'Volcanic Wasteland': 'rgba(255, 100, 50, 0.08)',
             'Lush Gardens': 'rgba(100, 255, 150, 0.08)',
