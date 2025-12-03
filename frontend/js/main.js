@@ -128,7 +128,6 @@ function updateConnectionStatus(connected) {
 }
 
 function applyAction(entity, action) {
-    // This function needs to run every frame to keep the entity moving towards its target
     if (!action) return;
 
     if (action.type === 'move') {
@@ -142,20 +141,22 @@ function applyAction(entity, action) {
         entity.moveTo(action.target_x, action.target_y, 0.9);
     } else if (action.type === 'wander') {
         
-        //continous movement for entitites not moving.
         const currentSpeed = Math.sqrt(entity.vx * entity.vx + entity.vy * entity.vy);
+        
+        // Anti-Stuck Mechanism: Kick them if they are barely moving
         if (currentSpeed < 0.4) {
             const angle = Math.random() * Math.PI * 2;
             entity.vx += Math.cos(angle) * 0.6;
-            entity.vy += Math.random(angle) * 0.6;
-        }else{
-            const turn = Math.random() < 0.05;
+            // FIX: Was Math.random(angle), changed to Math.sin(angle)
+            entity.vy += Math.sin(angle) * 0.6; 
+        } else {
+            // Smooth natural turning (Rotation Matrix)
+            const turn = (Math.random() - 0.5) * 0.2; // Small turn angle
             const vx = entity.vx;
             const vy = entity.vy;
 
-            //rotate velocity vector slightly
-            entity.vx = vx * Math.cos(turn) - vy * Math.sin(0.1);
-            entity.vy = vx * Math.sin(turn) + vy * Math.cos(0.1);
+            entity.vx = vx * Math.cos(turn) - vy * Math.sin(turn);
+            entity.vy = vx * Math.sin(turn) + vy * Math.cos(turn);
         }
     }
 }
@@ -246,79 +247,71 @@ function updateEntities(deltaTime) {
     const newEntities = [];
     
     for (let entity of entities) {
-        entity.age += deltaTime;
         
-        // Energy drain based on efficiency and environment
-        const envPenalty = entity.society.environment.harshness;
-        const energyDrain = (0.2 + envPenalty * 0.1) * (1 - entity.brain.genes.efficiency * 0.4);
-        entity.energy -= deltaTime * energyDrain;
+        entity.update(deltaTime);
         
-        // Diet bonus decay
-        entity.dietBonus *= 0.99;
-        
-        entity.reproductionCooldown = Math.max(0, entity.reproductionCooldown - deltaTime);
-        entity.communicationCooldown = Math.max(0, entity.communicationCooldown - deltaTime);
-        
+        //Death Check (Starvation or Old Age)
         if (entity.energy <= 0) {
-            continue; // Entity dies
+            continue; // Entity dies, is not added to newEntities list
         }
         
+        // Cap energy so they don't become god-like
         entity.energy = Math.min(150, entity.energy);
-        
-        entity.decisionTimer -= deltaTime;
 
+        entity.decisionTimer -= deltaTime;
         
         if (entity.decisionTimer <= 0) {
+            // Randomizizing entity next thoughts.
             entity.decisionTimer = 0.3 + Math.random() * 0.5;
 
             if (backend && backend.ws && backend.ws.readyState === WebSocket.OPEN) {
-            
+                // Async Backend Call
                 backend.getEntityDecision(entity, entities, resources).then(result => {
                     if (result && result.action) {
-                        // Store the decision 
                         entity.currentAction = result.action;
                     }
                 }).catch(err => {
-                    // If request fails, default to local AI
                     localAI(entity, entities, resources, signals);
                 });
             } else {
-            
+                // Fallback if backend offline
                 localAI(entity, entities, resources, signals);
             }
         }
 
+        
         if (entity.currentAction) {
             applyAction(entity, entity.currentAction);
-        } else if (!backend || backend.ws.readyState !== WebSocket.OPEN) {
-             
         }
-        
-        
 
-        // Move with speed influenced by diet
+       
+        
+        // Calculate Speed based on Genes and Diet
         const speedBonus = 1 + entity.dietBonus * 0.3;
         const speed = 10 * (0.5 + entity.brain.genes.speed * 0.5) * speedBonus;
+        
+        // Apply Velocity with Genetic Speed
         entity.x += entity.vx * deltaTime * speed;
         entity.y += entity.vy * deltaTime * speed;
         
-        // Friction
+        // Friction (Drag)
         entity.vx *= 0.95;
         entity.vy *= 0.95;
         
-        // Stay in or near territory (Soft boundaries)
+        // World Boundaries (Soft push-back)
         const territory = entity.society.territory;
         const margin = 100;
+        
         if (entity.x < territory.x - margin) entity.vx += 0.5;
         if (entity.x > territory.x + territory.width + margin) entity.vx -= 0.5;
         if (entity.y < territory.y - margin) entity.vy += 0.5;
         if (entity.y > territory.y + territory.height + margin) entity.vy -= 0.5;
         
-        // Check for resource gathering (Collision detection)
+        // 6. Resource Interaction
         for (let resource of resources) {
             if (resource.amount > 0 && entity.canEatResource(resource)) {
                 const dist = entity.distanceTo(resource);
-                if (dist < 15) {
+                if (dist < 15) { // Collision radius
                     const value = getResourceValue(entity, resource);
                     const taken = Math.min(value, resource.amount);
                     resource.amount -= taken;
@@ -355,7 +348,6 @@ function getResourceValue(entity, resource) {
     return value;
 }
 
-// Local AI fallback (Used when Backend is disconnected or between frames)
 function localAI(entity, entities, resources, signals) {
     const nearbyFood = resources.filter(r => {
         if (r.amount <= 0) return false;
@@ -371,11 +363,7 @@ function localAI(entity, entities, resources, signals) {
         e.society !== entity.society && entity.distanceTo(e) < 150
     ).length;
     
-    // Logic determines intended action, then sets entity.currentAction implicitly 
-    // by calling helper functions that set vx/vy or targets.
-    // To make this compatible with the new system, we should ideally update entity.currentAction
-    // but since localAI calls 'gatherResources' which calls 'moveTo', it works directly on Physics.
-    
+   
     if (entity.energy < 40) {
         gatherResources(entity, resources, signals);
         entity.currentAction = { type: 'gather' }; 
@@ -508,40 +496,46 @@ function communicate(entity, type, message, signals) {
 function reproduce(parent1, parent2) {
     if (parent1.reproductionCooldown > 0 || parent2.reproductionCooldown > 0) return;
     if (parent1.energy < 70 || parent2.energy < 70) return;
+    if (parent1.age < parent1.maturityAge || parent2.age < parent2.maturityAge) return;
     
     parent1.energy -= 30;
     parent2.energy -= 30;
     parent1.reproductionCooldown = 12;
     parent2.reproductionCooldown = 12;
     
+    
     const x = (parent1.x + parent2.x) / 2;
     const y = (parent1.y + parent2.y) / 2;
     
-    let childSociety;
-    if (parent1.society === parent2.society) {
-        childSociety = parent1.society;
-    } else {
-        childSociety = Math.random() < 0.5 ? parent1.society : parent2.society;
-    }
+    let childSociety = (parent1.society === parent2.society) 
+        ? parent1.society 
+        : (Math.random() < 0.5 ? parent1.society : parent2.society);
     
     const generation = Math.max(parent1.generation, parent2.generation) + 1;
     maxGeneration = Math.max(maxGeneration, generation);
     
-    const child = new Entity(
-        x + (Math.random() - 0.5) * 40, 
-        y + (Math.random() - 0.5) * 40, 
-        childSociety,
-        parent1,
-        parent2,
-        generation
-    );
-    child.id = entityIdCounter++;
-    child.energy = 80;
-    entities.push(child);
+    //Child Data
+    const childId = entityIdCounter++;
     
-    // Notify backend of reproduction 
     if (backend) {
-        backend.reproduceEntities(parent1, parent2, child.id);
+        backend.reproduceEntities(parent1, parent2, childId).then((response) => {
+            if (response.success) {
+                
+                const child = new Entity(
+                    x + (Math.random() - 0.5) * 40, 
+                    y + (Math.random() - 0.5) * 40, 
+                    childSociety,
+                    parent1,
+                    parent2,
+                    generation
+                );
+                child.id = childId;
+                child.energy = 80;
+                
+                entities.push(child);
+                console.log(`Born: Entity #${childId} (Gen ${generation})`);
+            }
+        });
     }
 }
 

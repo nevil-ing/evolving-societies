@@ -134,6 +134,9 @@ class Entity {
         this.vy = 0;
         this.energy = 100;
         this.age = 0;
+        this.maxLifespan = 300;
+        this.maturityAge = 45;
+        this.sizeScale = 0.3;
         this.generation = generation;
         this.parent1 = parent1;
         this.parent2 = parent2;
@@ -161,7 +164,33 @@ class Entity {
         if (parent1) parent1.children.push(this);
         if (parent2 && parent2 !== parent1) parent2.children.push(this);
     }
-    
+    update(dt){
+        this.age += dt;
+        this.decisionTimer += dt;
+        if (this.reproductionCooldown > 0){
+          this.reproductionCooldown -= dt;
+        }
+        if (this.communicationCooldown > 0){
+          this.communicationCooldown -= dt;
+        }
+        
+        //move
+       // this.x += this.vx * dt;
+        //this.y += this.vy * dt;
+        
+        //natural energy drain
+        const efficiencyFactor = 1.0 - (this.brain.genes.efficiency * 0.5); //more efficient means less drain
+        this.energy -= 2.0 * efficiencyFactor * dt;
+        
+        //age effects
+      if (this.age < this.maturityAge){
+        //grow slightly every frame until maturity
+        this.sizeScale = Math.min(1.0, 0.3 +(this.age / this.maturityAge) * 0.7);
+      }
+      if (this.age > this.maxLifespan){
+        this.energy = -10; //die of old age
+      }
+    }
     distanceTo(other) {
         const dx = this.x - other.x;
         const dy = this.y - other.y;
@@ -193,7 +222,7 @@ class Entity {
     draw(ctx, camera) {
         const screenX = this.x - camera.x;
         const screenY = this.y - camera.y;
-        const size = 9 * camera.zoom;
+        const size = 9 * camera.zoom* this.sizeScale;
         
         ctx.save();
         ctx.translate(screenX, screenY);
