@@ -1,0 +1,7 @@
+.DS_Store
+# Raw FlyWire downloads (large); see README to fetch them
+data/
+# Zig build output and package caches
+sim/.zig-cache/
+sim/zig-out/
+sim/zig-pkg/
