@@ -28,16 +28,19 @@ pub const MotorGene = enum(u8) {
 pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 
 /// Growing, recurrent cognitive network node layout:
-///   0 .. social_inputs-1                          : sensory, state & memory inputs
+///   0 .. social_inputs-1                            : sensory, state, memory & egocentric directional inputs
 ///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable leaky recurrent hidden neurons
-///   out_base .. max_cog_nodes-1                   : action output neurons
-pub const social_inputs = 20;
+///   out_base .. out_base+action_outputs-1           : 8 discrete action outputs
+///   out_base+8 .. out_base+10                       : 3 continuous motor/modulatory outputs (turn, speed, internal neuromodulator)
+pub const social_inputs = 26;
 pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
-pub const social_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
+pub const action_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
+pub const motor_outputs = 3; // turn_out, speed_out, mod_out
+pub const social_outputs = action_outputs + motor_outputs;
 pub const max_cog_hidden = 24;
 pub const out_base = social_inputs + max_cog_hidden;
 pub const max_cog_nodes = out_base + social_outputs;
-pub const max_cog_synapses = 256;
+pub const max_cog_synapses = 288;
 
 pub const Synapse = struct {
     from: u8,
@@ -58,10 +61,20 @@ pub const CognitiveBrain = struct {
     /// Online value/outcome predictor weights (for Temporal-Difference dopamine learning).
     pred_w: [max_cog_hidden]f32 = @splat(0),
     pred_bias: f32 = 0,
+    /// Evolvable ABCD Hebbian meta-learning plasticity rule (Soltoggio 2008 / Najarro & Risi 2020).
+    hebb_a: f32 = 0.8,
+    hebb_b: f32 = 0.0,
+    hebb_c: f32 = 0.0,
+    hebb_d: f32 = -0.04,
+    hebb_lr: f32 = 0.045,
     /// Runtime activations (hidden neurons carry leaky recurrent working memory).
     act: [max_cog_nodes]f32 = @splat(0),
-    /// Decaying pre*post eligibility traces for TD reward-modulated plasticity.
+    /// Decaying pre*post eligibility traces for TD + ABCD plasticity.
     elig: [max_cog_synapses]f32 = @splat(0),
+    /// Continuous cortical outputs computed on every decide().
+    turn_out: f32 = 0, // -1..+1 direct continuous steering torque
+    speed_out: f32 = 0, // -1..+1 direct continuous speed modulation
+    mod_out: f32 = 0, // -1..+1 evolved internal neuromodulatory gate
     /// Dynamic neuromodulators (runtime internal state).
     dopamine: f32 = 0.5, // reward surprise / motivation -> boosts plasticity
     noradrenaline: f32 = 0.2, // arousal / vigilance -> speeds thinking & adaptation
@@ -92,27 +105,38 @@ pub const CognitiveBrain = struct {
     }
 
     pub fn random(rng: Random) CognitiveBrain {
-        var b = CognitiveBrain{ .hidden_count = 4 };
+        var b = CognitiveBrain{
+            .hidden_count = 4,
+            .hebb_a = std.math.clamp(0.8 + rng.floatNorm(f32) * 0.25, -1.5, 1.5),
+            .hebb_b = std.math.clamp(rng.floatNorm(f32) * 0.12, -0.8, 0.8),
+            .hebb_c = std.math.clamp(rng.floatNorm(f32) * 0.12, -0.8, 0.8),
+            .hebb_d = std.math.clamp(-0.04 + rng.floatNorm(f32) * 0.03, -0.3, 0.1),
+            .hebb_lr = std.math.clamp(0.045 + rng.floatNorm(f32) * 0.015, 0.005, 0.12),
+        };
         for (&b.bias) |*v| v.* = rng.floatNorm(f32) * 0.25;
         for (0..b.hidden_count) |hi| b.pred_w[hi] = rng.floatNorm(f32) * 0.2;
-        // Founders lean toward foraging; curious individuals stumble onto gathering,
-        // tool-crafting, and building and lock them in through TD reward plasticity.
+        // Founders lean toward foraging; curious individuals discover tools, building,
+        // territorial defense, and continuous cortical steering through evolution & ABCD plasticity.
         b.bias[max_cog_hidden + @backingInt(SocialAction.forage)] += 1.35;
         b.bias[max_cog_hidden + @backingInt(SocialAction.gather)] += 0.15;
         b.bias[max_cog_hidden + @backingInt(SocialAction.craft_tool)] += 0.10;
         b.bias[max_cog_hidden + @backingInt(SocialAction.build)] += 0.10;
+        // Keep initial cortical turn/speed biases near zero so Gen 1 founders inherit clean FlyWire steering.
+        b.bias[max_cog_hidden + action_outputs + 0] = 0;
+        b.bias[max_cog_hidden + action_outputs + 1] = 0;
 
         // Compact starter wiring: sparse input -> hidden, hidden -> output, and 2 starter recurrent memory loops.
         for (0..b.hidden_count) |hi| {
             const h_node: u8 = @intCast(social_inputs + hi);
             for (0..social_inputs) |ii| {
-                if (rng.float(f32) < 0.40) {
-                    _ = b.insertSynapse(@intCast(ii), h_node, rng.floatNorm(f32) * 0.55);
+                if (rng.float(f32) < 0.34) {
+                    _ = b.insertSynapse(@intCast(ii), h_node, rng.floatNorm(f32) * 0.50);
                 }
             }
             for (0..social_outputs) |oi| {
                 const o_node: u8 = @intCast(out_base + oi);
-                _ = b.insertSynapse(h_node, o_node, rng.floatNorm(f32) * 0.55);
+                const scale: f32 = if (oi >= action_outputs) 0.22 else 0.52;
+                _ = b.insertSynapse(h_node, o_node, rng.floatNorm(f32) * scale);
             }
         }
         // Seed initial recurrent working-memory loops between hidden neurons.
@@ -135,6 +159,11 @@ pub const CognitiveBrain = struct {
             .bias = primary.bias,
             .pred_w = primary.pred_w,
             .pred_bias = std.math.clamp((a.pred_bias + b_parent.pred_bias) * 0.5 + mutation(rng, rate, 0.1), -2, 2),
+            .hebb_a = std.math.clamp((a.hebb_a + b_parent.hebb_a) * 0.5 + mutation(rng, rate, 0.12), -1.5, 1.5),
+            .hebb_b = std.math.clamp((a.hebb_b + b_parent.hebb_b) * 0.5 + mutation(rng, rate, 0.08), -0.8, 0.8),
+            .hebb_c = std.math.clamp((a.hebb_c + b_parent.hebb_c) * 0.5 + mutation(rng, rate, 0.08), -0.8, 0.8),
+            .hebb_d = std.math.clamp((a.hebb_d + b_parent.hebb_d) * 0.5 + mutation(rng, rate, 0.025), -0.3, 0.1),
+            .hebb_lr = std.math.clamp((a.hebb_lr + b_parent.hebb_lr) * 0.5 + mutation(rng, rate, 0.008), 0.005, 0.12),
         };
         for (&c.bias, secondary.bias) |*bv, sv| {
             const pick = if (rng.boolean()) bv.* else sv;
@@ -277,7 +306,7 @@ pub const CognitiveBrain = struct {
         for (0..b.hidden_count) |hi| pred += b.pred_w[hi] * b.act[social_inputs + hi];
         b.last_pred = std.math.tanh(pred);
 
-        // Evaluate output logits with subtle neuromodulatory tone.
+        // Evaluate discrete action logits (0..action_outputs-1) and continuous cortical outputs (turn, speed, mod).
         var best: usize = 0;
         var best_val: f32 = -std.math.inf(f32);
         for (0..social_outputs) |oi| {
@@ -286,17 +315,28 @@ pub const CognitiveBrain = struct {
             for (b.synapses[0..b.synapse_count]) |s| {
                 if (s.active and s.to == node) sum += s.weight * b.act[s.from];
             }
-            const act_kind: SocialAction = @fromBackingInt(@intCast(oi));
-            switch (act_kind) {
-                .build, .gather, .socialize => sum += 0.24 * (b.serotonin - 0.5),
-                .flee, .fight => sum += 0.24 * (b.noradrenaline - 0.5),
-                .craft_tool => sum += 0.18 * (b.dopamine - 0.5),
-                else => {},
-            }
-            b.act[node] = std.math.tanh(sum);
-            if (sum > best_val) {
-                best_val = sum;
-                best = oi;
+            if (oi < action_outputs) {
+                const act_kind: SocialAction = @fromBackingInt(@intCast(oi));
+                switch (act_kind) {
+                    .build, .gather, .socialize => sum += 0.24 * (b.serotonin - 0.5),
+                    .flee, .fight => sum += 0.24 * (b.noradrenaline - 0.5),
+                    .craft_tool => sum += 0.18 * (b.dopamine - 0.5),
+                    else => {},
+                }
+                b.act[node] = std.math.tanh(sum);
+                if (sum > best_val) {
+                    best_val = sum;
+                    best = oi;
+                }
+            } else {
+                const val = std.math.tanh(sum);
+                b.act[node] = val;
+                switch (oi - action_outputs) {
+                    0 => b.turn_out = val,
+                    1 => b.speed_out = val,
+                    2 => b.mod_out = val,
+                    else => {},
+                }
             }
         }
 
@@ -313,7 +353,7 @@ pub const CognitiveBrain = struct {
         return @fromBackingInt(@intCast(best));
     }
 
-    /// Temporal-Difference (dopamine) modulated plasticity: learns strongest from surprising outcomes.
+    /// Evolved ABCD Hebbian meta-learning modulated by TD dopamine AND the brain's own evolved mod_out neuron.
     pub fn learn(b: *CognitiveBrain, reward: f32) void {
         if (@abs(reward) < 1e-4) return;
         const td = std.math.clamp(reward - 0.35 * b.last_pred, -1.5, 1.5);
@@ -322,10 +362,15 @@ pub const CognitiveBrain = struct {
         for (0..b.hidden_count) |hi| {
             b.pred_w[hi] = std.math.clamp(b.pred_w[hi] + 0.04 * td * b.act[social_inputs + hi], -2, 2);
         }
-        const lr: f32 = 0.045 * (0.6 + 0.7 * b.dopamine + 0.4 * b.noradrenaline);
+        const mod_gate = std.math.clamp(0.65 * td + 0.35 * b.mod_out * @abs(td), -1.5, 1.5);
+        const lr: f32 = b.hebb_lr * (0.6 + 0.7 * b.dopamine + 0.4 * b.noradrenaline);
         for (b.synapses[0..b.synapse_count], b.elig[0..b.synapse_count]) |*s, el| {
-            if (!s.active or @abs(el) < 1e-4) continue;
-            const delta = std.math.clamp(lr * td * el, -0.09, 0.09);
+            if (!s.active) continue;
+            const pre = b.act[s.from];
+            const post = b.act[s.to];
+            const hebb = b.hebb_a * el + b.hebb_b * pre + b.hebb_c * post + b.hebb_d * s.weight;
+            if (@abs(hebb) < 1e-4) continue;
+            const delta = std.math.clamp(lr * mod_gate * hebb, -0.09, 0.09);
             s.weight = std.math.clamp(s.weight + delta, -4, 4);
         }
         b.dopamine = std.math.clamp(b.dopamine + 0.18 * (std.math.clamp(0.5 + 0.45 * td, 0.05, 1.0) - b.dopamine), 0.05, 1.0);

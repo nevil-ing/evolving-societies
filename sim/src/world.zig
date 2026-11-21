@@ -192,6 +192,7 @@ pub const Predator = struct {
     lunge_timer: f32 = 0,
     flee_timer: f32 = 0,
     stagger_timer: f32 = 0,
+    sated_timer: f32 = 0,
     kills: u32 = 0,
 
     pub fn radius(_: *const Predator) f32 {
@@ -1106,6 +1107,7 @@ pub const World = struct {
             p.flee_timer = @max(0, p.flee_timer - dt);
             p.stagger_timer = @max(0, p.stagger_timer - dt);
             p.lunge_timer = @max(0, p.lunge_timer - dt);
+            p.sated_timer = @max(0, p.sated_timer - dt);
             p.energy = @max(10, p.energy - 0.35 * dt);
 
             // Scan nearby entities: stalk isolated / vulnerable targets outside shelters,
@@ -1159,7 +1161,8 @@ pub const World = struct {
             var spd: f32 = 24;
             if (p.flee_timer > 0) {
                 spd = if (p.stagger_timer > 0) 20 else 50;
-            } else if (best_prey) |ti| {
+            } else if (p.sated_timer <= 0 and best_prey != null) {
+                const ti = best_prey.?;
                 const target_e = &w.entities.items[ti];
                 const d = p.pos.dist(target_e.pos);
                 p.heading += steerTo(p.heading, p.pos, target_e.pos, 4.2) * dt;
@@ -1178,6 +1181,7 @@ pub const World = struct {
                     w.field.deposit(alarmChannel(target_e.society), target_e.pos.x, target_e.pos.y, dmg * 0.9);
                     if (target_e.energy <= 0 and target_e.dead == null) {
                         p.kills += 1;
+                        p.sated_timer = 22; // digest kill before stalking again
                         p.energy = @min(140, p.energy + 45);
                         p.hp = @min(p.max_hp, p.hp + 25);
                         try w.killCorpse(ti, .killed, 18);
@@ -1579,8 +1583,9 @@ pub const World = struct {
             g.cog.dopamine = std.math.clamp(g.cog.dopamine + (0.5 - g.cog.dopamine) * @min(1, dt * 0.25), 0.05, 1.0);
         }
 
-        // Social decision (18 sensory/memory inputs -> recurrent leaky hidden state -> 8 actions).
+        // Social decision (26 egocentric/sensory/memory inputs -> leaky recurrent hidden state -> 8 actions + 3 continuous motor/mod outputs).
         // Thinking tempo adapts dynamically: alert/aroused entities deliberate faster in crisis!
+        const home_rect = w.territories[e.society];
         e.action_timer -= dt;
         if (e.action_timer <= 0 and !w.forage_only) {
             e.action_timer = 0.55 - 0.30 * g.cog.noradrenaline;
@@ -1609,6 +1614,50 @@ pub const World = struct {
             }
             mem_social_cue = std.math.clamp(mem_social_cue, -1, 1);
 
+            // Egocentric directional vision (-1 left .. 0 ahead .. +1 right).
+            const dir_food: f32 = if (e.visible_food) |fp|
+                egocentricBearing(e.heading, e.pos, fp)
+            else if (e.near_cache) |ci|
+                (if (w.structures.items[ci].stored_food > 5) egocentricBearing(e.heading, e.pos, w.structures.items[ci].pos) else 0)
+            else if (e.recall(.food, 0.2)) |fi|
+                egocentricBearing(e.heading, e.pos, e.memories[fi].pos)
+            else
+                0;
+
+            const dir_threat: f32 = if (e.near_predator) |pi|
+                egocentricBearing(e.heading, e.pos, w.predators.items[pi].pos)
+            else if (e.enemy) |ei|
+                egocentricBearing(e.heading, e.pos, w.entities.items[ei].pos)
+            else if (e.recall(.danger, 0.3)) |di|
+                egocentricBearing(e.heading, e.pos, e.memories[di].pos)
+            else
+                0;
+
+            const dir_kin: f32 = if (e.ally) |ai|
+                egocentricBearing(e.heading, e.pos, w.entities.items[ai].pos)
+            else if (e.heard_kind != null)
+                egocentricBearing(e.heading, e.pos, e.heard_pos)
+            else
+                0;
+
+            const dir_material: f32 = if (e.near_material) |mi|
+                egocentricBearing(e.heading, e.pos, w.materials.items[mi].pos)
+            else if (e.recall(.material, 0.2)) |qi|
+                egocentricBearing(e.heading, e.pos, e.memories[qi].pos)
+            else
+                0;
+
+            const dir_structure: f32 = if (e.near_structure) |si|
+                egocentricBearing(e.heading, e.pos, w.structures.items[si].pos)
+            else if (e.enemy_structure) |esi|
+                egocentricBearing(e.heading, e.pos, w.structures.items[esi].pos)
+            else if (e.recall(.shelter, 0.25)) |shi|
+                egocentricBearing(e.heading, e.pos, e.memories[shi].pos)
+            else
+                0;
+
+            const dir_home: f32 = egocentricBearing(e.heading, e.pos, home_rect.center());
+
             e.action = g.decide(.{
                 e.energy / max_energy,
                 @min(e.since_meal / 30, 1),
@@ -1630,33 +1679,32 @@ pub const World = struct {
                 mem_social_cue,
                 if (e.near_predator != null) 1 - e.predator_dist / sense_range else 0,
                 if (e.intruder_in_home) 1 else 0,
+                dir_food,
+                dir_threat,
+                dir_kin,
+                dir_material,
+                dir_structure,
+                dir_home,
             });
         }
 
-        // Stay near home when fed and territorial; adventurous or hungry entities roam far out into the wild.
-        // Desperate meat-capable predators with zero food in sight or smell hunt prey (including kin).
+        // Physical developmental constraint only: infants cannot fight, craft, build, or mate.
+        // All adult/juvenile action choices come directly from the recurrent CognitiveBrain (no forced overrides!).
         const lstage = e.stage();
         const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
-        const starving_hunt = !w.forage_only and lstage != .infant and e.enemy != null and e.visible_food == null and
-            (e.cannibal_target or (e.energy < 36 and e.since_meal > 18 and e.odour < 0.08 and canEat(e, .meat) > 0 and g.trait(.aggression) > 0.58));
-        const hunting_prey = !w.forage_only and lstage != .infant and e.enemy == null and e.near_prey != null and e.energy > 35 and
-            ((e.tool == .spear and e.energy < 115) or (e.action == .fight and e.energy < 105));
         if (lstage == .infant and (e.action == .fight or e.action == .craft_tool or e.action == .build or e.action == .mate)) {
             e.action = .forage;
-        } else if (starving_hunt) {
-            e.action = .fight;
-        } else if (e.energy < 35 and e.action != .flee) {
-            e.action = .forage;
         }
+        const hunting_prey = !w.forage_only and lstage != .infant and e.near_prey != null and e.near_predator == null and e.enemy == null and
+            (e.action == .fight or (e.tool == .spear and e.action == .forage and e.visible_food == null and e.energy < 95));
 
-        // Steering comes from the fly circuit unless a social goal overrides it.
-        // A slow baseline is subtracted to cancel the connectome's built-in
-        // left/right bias. The left antenna sits at heading - 0.5, so more
-        // left-side DNa activity has to lower the heading.
+        // Steering blends the FlyWire brainstem with continuous cortical steering (g.cog.turn_out).
+        // A slow baseline is subtracted to cancel the connectome's built-in left/right bias.
         const m = e.motor;
         const turn_diff = m.turn_R - m.turn_L;
         e.turn_base += (turn_diff - e.turn_base) * @min(1, dt / 1.5);
         var turn = std.math.clamp(g.motorGene(.turn) * (turn_diff - e.turn_base), -6, 6) + g.motorGene(.wander) * w.rng().floatNorm(f32);
+        if (!w.forage_only) turn += g.cog.turn_out * 3.5;
         const target: ?Vec2 = if (hunting_prey)
             w.prey.items[e.near_prey.?].pos
         else switch (e.action) {
@@ -1669,7 +1717,7 @@ pub const World = struct {
             .craft_tool => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else null,
             .build => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else (if (e.near_structure) |si| w.structures.items[si].pos else if (!w.territories[e.society].contains(e.pos)) w.territories[e.society].center() else null),
         };
-        if (target) |t| turn = steerTo(e.heading, e.pos, t, 5);
+        if (target) |t| turn = steerTo(e.heading, e.pos, t, 4.8) + (if (!w.forage_only) g.cog.turn_out * 1.2 else 0);
 
         // Adventure / exploration drive + active communication + visual food pursuit + storm huddling.
         e.explore_timer = @max(0, e.explore_timer - dt);
@@ -1727,29 +1775,13 @@ pub const World = struct {
             }
         }
 
-        const home_rect = w.territories[e.society];
+        // Storm comfort/exposure signal feeds directly into ABCD Hebbian learning instead of hardcoding storm steering.
         var seeking_shelter = false;
-        if (!w.forage_only and !acted_on_signal and w.phase == .storm and e.energy > 50 and !e.feeding and e.action != .fight and e.action != .flee) {
-            // During storms, prefer a completed friendly Shelter; otherwise huddle with kin or pull toward home.
-            if (!e.in_shelter) {
-                if (e.near_structure) |si| {
-                    const st = w.structures.items[si];
-                    if (st.complete() and st.kind == .shelter and st.pos.dist(e.pos) > st.radius() * 0.65) {
-                        turn = steerTo(e.heading, e.pos, st.pos, 4.0);
-                        seeking_shelter = true;
-                    }
-                }
-                if (!seeking_shelter and !e.huddled) {
-                    if (e.ally) |ai| {
-                        if (e.ally_dist > 22) {
-                            turn = steerTo(e.heading, e.pos, w.entities.items[ai].pos, 3.6);
-                            seeking_shelter = true;
-                        }
-                    } else if (!home_rect.contains(e.pos)) {
-                        turn = steerTo(e.heading, e.pos, home_rect.center(), 3.2);
-                        seeking_shelter = true;
-                    }
-                }
+        if (!w.forage_only and w.phase == .storm) {
+            if (e.in_shelter or e.huddled) {
+                g.cog.learn(0.03 * dt);
+            } else {
+                g.cog.learn(-0.04 * dt);
             }
         }
 
@@ -1913,11 +1945,12 @@ pub const World = struct {
         if (m.back > 0.3) speed = -0.4 * base;
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
-        if (e.action == .flee and e.enemy != null) speed = base * 1.2;
-        if (starving_hunt or hunting_prey) speed = @max(speed, base * 1.12);
+        if (e.action == .flee and (e.enemy != null or e.near_predator != null)) speed = base * 1.2;
+        if (hunting_prey or (e.action == .fight and (e.enemy != null or e.near_predator != null))) speed = @max(speed, base * 1.12);
         if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or seeking_cache or e.recalling != null or acted_on_signal or target != null) {
             speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
         }
+        if (!w.forage_only) speed *= std.math.clamp(1.0 + 0.30 * g.cog.speed_out, 0.55, 1.35);
         if (e.carrying != .none) speed *= 0.88;
         speed *= switch (lstage) {
             .infant => 0.72,
@@ -3060,6 +3093,13 @@ fn nudgeAngle(current: f32, target: f32, amount: f32) f32 {
 
 fn away(from: Vec2, threat: Vec2) Vec2 {
     return .{ .x = from.x * 2 - threat.x, .y = from.y * 2 - threat.y };
+}
+
+/// Signed egocentric bearing from `heading` to `target` in [-1, +1] (-0.5 left, 0 ahead, +0.5 right).
+fn egocentricBearing(heading: f32, pos: Vec2, target: Vec2) f32 {
+    const want = std.math.atan2(target.y - pos.y, target.x - pos.x);
+    const diff = @mod(want - heading + std.math.pi, std.math.tau) - std.math.pi;
+    return std.math.clamp(diff / std.math.pi, -1, 1);
 }
 
 /// Angular velocity that turns `heading` toward `target`.

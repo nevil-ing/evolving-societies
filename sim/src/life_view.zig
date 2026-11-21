@@ -1593,7 +1593,7 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     const s = sim.societies[e.society];
     const x: f32 = 12;
     var y: f32 = 114;
-    const h: f32 = if (app.show_brain) 714 else 534;
+    const h: f32 = if (app.show_brain) 728 else 534;
     panel(x, y, 300, h);
     y += 8;
     text(x + 12, y, 17, societyColor(s), "{s} #{d}", .{ s.name, e.id });
@@ -1686,6 +1686,10 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
         text(x + 12, y, 10, rgb(165, 195, 220), "DA {d:.2}  NA {d:.2}  5HT {d:.2}   mem {d}/6  bonds {d}", .{
             cog.dopamine, cog.noradrenaline, cog.serotonin, e.activeMemories(), e.bondCount(),
         });
+        y += 13;
+        text(x + 12, y, 10, rgb(185, 165, 225), "Hebb A {d:.2}  lr {d:.3}   turn {d:.2}  spd {d:.2}  mod {d:.2}", .{
+            cog.hebb_a, cog.hebb_lr, cog.turn_out, cog.speed_out, cog.mod_out,
+        });
         y += 14;
         drawCognitiveGraph(cog, x + 12, y, 276, 54);
         y += 58;
@@ -1758,7 +1762,14 @@ fn drawCognitiveGraph(cog: *const gen.CognitiveBrain, x: f32, y: f32, w: f32, h:
     for (0..gen.social_outputs) |oi| {
         const idx = gen.out_base + oi;
         const a = std.math.clamp(@abs(cog.act[idx]), 0, 1);
-        rl.DrawCircleV(pos[idx], 3.2, withAlpha(actionColor(@fromBackingInt(@intCast(oi))), 110 + @as(u8, @intFromFloat(a * 145))));
+        const col: rl.Color = if (oi < gen.action_outputs)
+            actionColor(@fromBackingInt(@intCast(oi)))
+        else switch (oi - gen.action_outputs) {
+            0 => rgb(255, 215, 90), // turn_out
+            1 => rgb(95, 235, 255), // speed_out
+            else => rgb(235, 115, 255), // mod_out (evolved neuromodulator)
+        };
+        rl.DrawCircleV(pos[idx], 3.0, withAlpha(col, 110 + @as(u8, @intFromFloat(a * 145))));
     }
 }
 

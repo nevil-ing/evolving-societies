@@ -305,10 +305,10 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expect(brain.sproutFromExperience(rng));
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
-    // Run a decision then apply positive reward: weights, predictor, and dopamine should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0 });
+    // Run a decision then apply positive reward: weights, predictor, continuous outputs, and dopamine should adapt.
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2 });
     // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
-    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     var hidden_mag: f32 = 0;
     for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
     try std.testing.expect(hidden_mag > 1e-3);
@@ -348,6 +348,7 @@ test "world: starving entity spots nearby food visually and eats instead of idli
     e.pos = .{ .x = 0, .y = 0 };
     e.heading = std.math.pi; // facing away from the food!
     e.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    e.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.forage)] = 4.0;
     for (e.genome.fly_gain) |*g| g.* = 1.0;
 
     // Place food 65 units away with ZERO pre-diffused scent.
@@ -504,6 +505,7 @@ test "world: starvation cannibalism emerges when all food is removed" {
     hunter.genome.traits[@backingInt(gen.Trait.aggression)] = 0.92;
     hunter.genome.traits[@backingInt(gen.Trait.speed)] = 0.85;
     hunter.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    hunter.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.fight)] = 3.5;
     for (hunter.genome.fly_gain) |*g| g.* = 1.0;
 
     const prey = &w.entities.items[1];
@@ -554,10 +556,17 @@ test "world: entities craft stone spears and hunt wild prey for a rich harvest" 
     hunter.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.craft_tool)] = 4.0;
     try w.prey.append(gpa, .{ .pos = .{ .x = 26, .y = 0 }, .heading = 0, .hp = 45, .max_hp = 90 });
 
-    for (0..60 * 5) |_| try w.step(1.0 / 60.0);
-
+    // Phase 1: craft the Stone Spear when brain chooses craft_tool.
+    for (0..60) |_| try w.step(1.0 / 60.0);
     try std.testing.expect(w.stats[1].tools_crafted >= 1);
     try std.testing.expect(w.stats[1].discovered_tools);
+    try std.testing.expectEqual(sim.ToolKind.spear, w.entities.items[0].tool);
+
+    // Phase 2: hunt the Wild Prey when brain chooses fight.
+    w.entities.items[0].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.craft_tool)] = 0;
+    w.entities.items[0].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.fight)] = 4.0;
+    for (0..60 * 5) |_| try w.step(1.0 / 60.0);
+
     try std.testing.expect(w.stats[1].prey_hunted >= 1);
     // Hunted wild prey drops rich food items into the world.
     try std.testing.expect(w.foodCount() >= 2);
