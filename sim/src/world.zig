@@ -115,6 +115,8 @@ pub const Skill = enum(u8) {
     navigation, // lower travel cost & sharper scent tracking
     combat, // higher damage & better defense
     care, // stronger food sharing & skill transfer to youth/offspring
+    building, // faster construction/repair of shelters & food caches
+    toolcraft, // crafting spears/baskets & hunting wild prey with tools
 };
 pub const skill_count = @typeInfo(Skill).@"enum".field_names.len;
 
@@ -125,7 +127,54 @@ pub const Role = enum(u8) {
     scout,
     guard,
     caretaker,
+    builder,
+    hunter,
     elder,
+};
+pub const role_count = @typeInfo(Role).@"enum".field_names.len;
+
+pub const MaterialKind = enum(u8) { wood, stone };
+
+pub const Material = struct {
+    pos: Vec2,
+    kind: MaterialKind,
+    amount: f32,
+};
+
+pub const CarryItem = enum(u8) { none, wood, stone };
+pub const ToolKind = enum(u8) { none, spear, basket };
+
+pub const StructureKind = enum(u8) { shelter, cache };
+
+pub const Structure = struct {
+    pos: Vec2,
+    society: u8,
+    kind: StructureKind,
+    progress: f32, // 0..100, functional once >= 100
+    integrity: f32 = 100,
+    stored_food: f32 = 0, // up to 240 for .cache
+    builder_id: u32,
+
+    pub fn complete(s: *const Structure) bool {
+        return s.progress >= 100;
+    }
+    pub fn radius(s: *const Structure) f32 {
+        return switch (s.kind) {
+            .shelter => 48,
+            .cache => 34,
+        };
+    }
+};
+pub const max_structures_per_society = 8;
+pub const max_cache_food: f32 = 240;
+
+pub const Prey = struct {
+    pos: Vec2,
+    heading: f32,
+    hp: f32 = 90,
+    max_hp: f32 = 90,
+    flee_timer: f32 = 0,
+    stagger_timer: f32 = 0,
 };
 
 pub const SocietyStatus = enum(u8) { thriving, stable, struggling, endangered, extinct };
@@ -159,7 +208,7 @@ pub fn phaseRemaining(time: f32) f32 {
     return cycle_length - t;
 }
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, world_bloom, world_storm };
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, world_bloom, world_storm };
 
 pub const WorldEvent = struct {
     time: f32,
@@ -249,12 +298,21 @@ pub const Entity = struct {
     heard_pos: Vec2 = .{ .x = 0, .y = 0 },
     heard_timer: f32 = 0,
     last_sent: ?SignalKind = null,
+    carrying: CarryItem = .none,
+    tool: ToolKind = .none,
+    tool_durability: f32 = 0,
+    craft_cooldown: f32 = 0,
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
     visible_food: ?Vec2 = null,
     huddled: bool = false,
+    in_shelter: bool = false,
     cannibal_target: bool = false,
+    near_material: ?u32 = null,
+    near_structure: ?u32 = null,
+    near_cache: ?u32 = null,
+    near_prey: ?u32 = null,
     enemy: ?u32 = null,
     enemy_dist: f32 = 0,
     enemies_near: u32 = 0,
@@ -298,12 +356,17 @@ pub const Entity = struct {
             }
         }
         if (e.age > 300 and total >= 0.75) return .elder;
+        if (e.tool == .spear and e.skill(.toolcraft) >= 0.14) return .hunter;
+        if (e.skill(.building) >= 0.22 and e.skill(.building) >= e.skill(.toolcraft)) return .builder;
+        if (e.skill(.toolcraft) >= 0.22) return .hunter;
         if (best_v < 0.18) return .novice;
         return switch (@as(Skill, @fromBackingInt(@intCast(best_i)))) {
             .foraging => .forager,
             .navigation => .scout,
             .combat => .guard,
             .care => .caretaker,
+            .building => .builder,
+            .toolcraft => .hunter,
         };
     }
 };
@@ -332,6 +395,11 @@ pub const SocietyStats = struct {
     signals_acted: u32 = 0,
     cannibal_kills: u32 = 0,
     had_cannibalism: bool = false,
+    tools_crafted: u32 = 0,
+    structures_built: u32 = 0,
+    prey_hunted: u32 = 0,
+    discovered_tools: bool = false,
+    discovered_building: bool = false,
 };
 
 pub const World = struct {
@@ -341,6 +409,11 @@ pub const World = struct {
     entities: std.ArrayList(Entity) = .empty,
     resources: std.ArrayList(Resource) = .empty,
     patches: std.ArrayList(Patch) = .empty,
+    materials: std.ArrayList(Material) = .empty,
+    structures: std.ArrayList(Structure) = .empty,
+    prey: std.ArrayList(Prey) = .empty,
+    material_timer: f32 = 0,
+    prey_timer: f32 = 0,
     field: pher.Field,
     time: f32 = 0,
     next_id: u32 = 1,
@@ -391,6 +464,11 @@ pub const World = struct {
         w.entities.clearRetainingCapacity();
         w.resources.clearRetainingCapacity();
         w.patches.clearRetainingCapacity();
+        w.materials.clearRetainingCapacity();
+        w.structures.clearRetainingCapacity();
+        w.prey.clearRetainingCapacity();
+        w.material_timer = 0;
+        w.prey_timer = 0;
         w.field.clear();
         w.prng = .init(seed);
         w.time = 0;
@@ -434,6 +512,12 @@ pub const World = struct {
         }
 
         for (societies, 0..) |s, si| {
+            // Raw materials: stone outcrops & timber scattered in and around each homeland.
+            const stone_n: usize = if (si == 1) 2 else 4;
+            const wood_n: usize = 6 - stone_n;
+            for (0..stone_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .stone, .amount = 45 });
+            for (0..wood_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .wood, .amount = 45 });
+
             for (0..25) |_| {
                 const g = try gen.Genome.random(w.gpa, w.rng(), w.circuit.types);
                 const e = try w.addEntity(@intCast(si), w.randomIn(s.territory.inset(40)), g);
@@ -442,6 +526,10 @@ pub const World = struct {
                 w.recordGeneration(e);
             }
         }
+        // Frontier raw materials & wild prey for exploration, building, and tool-hunting.
+        for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .wood, .amount = 45 });
+        for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .stone, .amount = 45 });
+        try w.spawnPrey(5);
     }
 
     const patch_items = 8;
@@ -659,17 +747,77 @@ pub const World = struct {
         return spawned;
     }
 
+    pub fn spawnPrey(w: *World, count: usize) !void {
+        const wild = bounds.inset(140);
+        for (0..count) |_| {
+            if (w.prey.items.len >= 12) break;
+            try w.prey.append(w.gpa, .{
+                .pos = w.randomIn(wild),
+                .heading = w.rng().float(f32) * std.math.tau,
+            });
+        }
+    }
+
+    /// Give one mature pioneer per society a small insight boost in building & toolcraft
+    /// so the user can compare organic discovery vs. cultural seeding.
+    pub fn inspirePioneers(w: *World) void {
+        for (0..society_count) |si| {
+            for (w.entities.items) |*e| {
+                if (e.dead != null or e.society != si or !e.mature()) continue;
+                e.skills[@backingInt(Skill.building)] = @max(e.skills[@backingInt(Skill.building)], 0.45);
+                e.skills[@backingInt(Skill.toolcraft)] = @max(e.skills[@backingInt(Skill.toolcraft)], 0.45);
+                e.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.gather)] += 0.55;
+                e.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.craft_tool)] += 0.55;
+                e.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.build)] += 0.55;
+                _ = e.genome.cog.sproutFromExperience(w.rng());
+                break;
+            }
+        }
+    }
+
+    pub fn structureCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (w.structures.items) |s| if (s.integrity > 0 and s.complete()) {
+            n += 1;
+        };
+        return n;
+    }
+
+    pub fn toolCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (w.entities.items) |e| if (e.dead == null and e.tool != .none) {
+            n += 1;
+        };
+        return n;
+    }
+
+    pub fn preyCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (w.prey.items) |p| if (p.hp > 0) {
+            n += 1;
+        };
+        return n;
+    }
+
     /// Advance the simulation by one fixed tick.
     pub fn step(w: *World, dt: f32) !void {
         w.time += dt;
         w.field.update(dt);
         try w.updateFood(dt);
+        if (!w.forage_only) {
+            try w.updateMaterials(dt);
+            try w.updatePrey(dt);
+            w.updateStructures(dt);
+        }
 
         w.brain_accum += dt;
         if (w.brain_accum >= 1 / brain_hz) {
             w.brain_accum -= 1 / brain_hz;
             w.removeDead();
             w.removeEaten();
+            w.removeDepletedMaterials();
+            w.removeDeadPrey();
+            w.removeCollapsedStructures();
             w.think();
         }
 
@@ -724,6 +872,93 @@ pub const World = struct {
         for (w.resources.items) |*r| {
             if (r.corpse) r.amount -= 1.2 * dt; // corpses rot
             if (r.amount > 0) w.field.deposit(scentChannel(r.food), r.pos.x, r.pos.y, r.amount / food_amount * 3.0 * dt);
+        }
+    }
+
+    fn updateMaterials(w: *World, dt: f32) !void {
+        w.material_timer += dt;
+        if (w.material_timer >= 18) {
+            w.material_timer = 0;
+            if (w.materials.items.len < 54) {
+                const kind: MaterialKind = if (w.rng().boolean()) .stone else .wood;
+                const area = if (w.rng().float(f32) < 0.45)
+                    w.territories[w.rng().uintLessThan(usize, society_count)].inset(25)
+                else
+                    bounds.inset(110);
+                try w.materials.append(w.gpa, .{ .pos = w.randomIn(area), .kind = kind, .amount = 45 });
+            }
+        }
+    }
+
+    fn updatePrey(w: *World, dt: f32) !void {
+        const edge = bounds.inset(45);
+        for (w.prey.items) |*p| {
+            if (p.hp <= 0) continue;
+            p.flee_timer = @max(0, p.flee_timer - dt);
+            p.stagger_timer = @max(0, p.stagger_timer - dt);
+            if (p.flee_timer <= 0) {
+                p.hp = @min(p.max_hp, p.hp + 1.5 * dt);
+                p.heading += w.rng().floatNorm(f32) * 0.9 * dt;
+            }
+            const spd: f32 = if (p.stagger_timer > 0) 15 else if (p.flee_timer > 0) 42 else 18;
+            p.pos.x += @cos(p.heading) * spd * dt;
+            p.pos.y += @sin(p.heading) * spd * dt;
+            if (!edge.contains(p.pos)) {
+                p.pos.x = std.math.clamp(p.pos.x, edge.x, edge.x + edge.w);
+                p.pos.y = std.math.clamp(p.pos.y, edge.y, edge.y + edge.h);
+                p.heading += std.math.pi;
+            }
+        }
+        w.prey_timer += dt;
+        if (w.prey_timer >= 45) {
+            w.prey_timer = 0;
+            if (w.scarcity != .none and w.preyCount() < 5) try w.spawnPrey(1);
+        }
+    }
+
+    fn updateStructures(w: *World, dt: f32) void {
+        const storm_wear: f32 = if (w.phase == .storm) 0.10 else 0.035;
+        for (w.structures.items) |*s| {
+            if (s.complete()) {
+                s.integrity -= storm_wear * dt;
+            } else {
+                // Unfinished piles slowly erode if abandoned.
+                s.progress -= 0.15 * dt;
+                if (s.progress <= 0) s.integrity = 0;
+            }
+        }
+    }
+
+    fn removeDepletedMaterials(w: *World) void {
+        var i: usize = 0;
+        while (i < w.materials.items.len) {
+            if (w.materials.items[i].amount <= 0) {
+                _ = w.materials.swapRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    fn removeDeadPrey(w: *World) void {
+        var i: usize = 0;
+        while (i < w.prey.items.len) {
+            if (w.prey.items[i].hp <= 0) {
+                _ = w.prey.swapRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    fn removeCollapsedStructures(w: *World) void {
+        var i: usize = 0;
+        while (i < w.structures.items.len) {
+            if (w.structures.items[i].integrity <= 0) {
+                _ = w.structures.swapRemove(i);
+                continue;
+            }
+            i += 1;
         }
     }
 
@@ -908,6 +1143,52 @@ pub const World = struct {
             e.enemy_dist = weak_kin_dist;
             e.cannibal_target = true;
         }
+
+        // Materials, structures (shelters & food caches), and wild prey.
+        e.near_material = null;
+        e.near_structure = null;
+        e.near_cache = null;
+        e.near_prey = null;
+        e.in_shelter = false;
+        if (!w.forage_only) {
+            var mat_dist: f32 = sense_range;
+            for (w.materials.items, 0..) |m_item, mi| {
+                if (m_item.amount <= 0) continue;
+                const d = m_item.pos.dist(e.pos);
+                if (d < mat_dist) {
+                    mat_dist = d;
+                    e.near_material = @intCast(mi);
+                }
+            }
+            var str_dist: f32 = sense_range * 1.4;
+            var cache_dist: f32 = sense_range * 1.25;
+            for (w.structures.items, 0..) |st, si| {
+                if (st.integrity <= 0 or st.society != e.society) continue;
+                const d = st.pos.dist(e.pos);
+                if (st.complete() and st.kind == .shelter and d < st.radius()) {
+                    e.in_shelter = true;
+                }
+                if (st.complete() and st.kind == .cache and d < cache_dist) {
+                    cache_dist = d;
+                    e.near_cache = @intCast(si);
+                }
+                // Prefer incomplete/damaged structures for building, or completed shelters during storms.
+                const useful_struct = !st.complete() or st.integrity < 85 or (w.phase == .storm and st.kind == .shelter);
+                if (useful_struct and d < str_dist) {
+                    str_dist = d;
+                    e.near_structure = @intCast(si);
+                }
+            }
+            var prey_dist: f32 = sense_range * 1.15;
+            for (w.prey.items, 0..) |pr, pi| {
+                if (pr.hp <= 0) continue;
+                const d = pr.pos.dist(e.pos);
+                if (d < prey_dist) {
+                    prey_dist = d;
+                    e.near_prey = @intCast(pi);
+                }
+            }
+        }
     }
 
     fn act(w: *World, i: usize, dt: f32) !void {
@@ -920,11 +1201,20 @@ pub const World = struct {
         e.repro_cooldown -= dt;
         e.escape_timer -= dt;
         e.bump_cooldown = @max(0, e.bump_cooldown - dt);
+        e.craft_cooldown = @max(0, e.craft_cooldown - dt);
 
-        // Social decision.
+        // Social decision (16 sensory/state inputs -> 8 actions including gather, craft_tool, build).
         e.action_timer -= dt;
         if (e.action_timer <= 0 and !w.forage_only) {
             e.action_timer = 0.5;
+            const env_sig: f32 = if (w.phase == .storm and !e.in_shelter)
+                1.0
+            else if (e.in_shelter)
+                -0.5
+            else if (e.near_prey != null)
+                0.7
+            else
+                0;
             e.action = g.decide(.{
                 e.energy / max_energy,
                 @min(e.since_meal / 30, 1),
@@ -938,6 +1228,10 @@ pub const World = struct {
                 if (e.mature()) 1 else 0,
                 if (e.readyToMate()) 1 else 0,
                 if (e.hybrid) 1 else 0,
+                if (e.carrying != .none) 1 else 0,
+                if (e.tool != .none) 1 else 0,
+                if (e.near_material != null) 1 else 0,
+                env_sig,
             });
         }
 
@@ -946,6 +1240,8 @@ pub const World = struct {
         const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
         const starving_hunt = !w.forage_only and e.enemy != null and e.visible_food == null and
             (e.cannibal_target or (e.energy < 36 and e.since_meal > 18 and e.odour < 0.08 and canEat(e, .meat) > 0 and g.trait(.aggression) > 0.58));
+        const hunting_prey = !w.forage_only and e.enemy == null and e.near_prey != null and e.energy > 35 and
+            ((e.tool == .spear and e.energy < 115) or (e.action == .fight and e.energy < 105));
         if (starving_hunt) {
             e.action = .fight;
         } else if (e.energy < 35 and e.action != .flee) {
@@ -960,12 +1256,17 @@ pub const World = struct {
         const turn_diff = m.turn_R - m.turn_L;
         e.turn_base += (turn_diff - e.turn_base) * @min(1, dt / 1.5);
         var turn = std.math.clamp(g.motorGene(.turn) * (turn_diff - e.turn_base), -6, 6) + g.motorGene(.wander) * w.rng().floatNorm(f32);
-        const target: ?Vec2 = switch (e.action) {
+        const target: ?Vec2 = if (hunting_prey)
+            w.prey.items[e.near_prey.?].pos
+        else switch (e.action) {
             .forage => null,
             .fight => if (e.enemy) |o| w.entities.items[o].pos else null,
             .mate => if (e.mate) |o| w.entities.items[o].pos else null,
             .socialize => if (e.ally) |o| (if (e.ally_dist > 30 + 60 * g.trait(.sociability)) w.entities.items[o].pos else null) else null,
             .flee => if (e.enemy) |o| away(e.pos, w.entities.items[o].pos) else null,
+            .gather => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else (if (e.near_structure) |si| w.structures.items[si].pos else null),
+            .craft_tool => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else null,
+            .build => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else (if (e.near_structure) |si| w.structures.items[si].pos else if (!w.territories[e.society].contains(e.pos)) w.territories[e.society].center() else null),
         };
         if (target) |t| turn = steerTo(e.heading, e.pos, t, 5);
 
@@ -1028,21 +1329,43 @@ pub const World = struct {
         const home_rect = w.territories[e.society];
         var seeking_shelter = false;
         if (!w.forage_only and !acted_on_signal and w.phase == .storm and e.energy > 50 and !e.feeding and e.action != .fight and e.action != .flee) {
-            // During storms, non-starving beings huddle with nearby kin or pull back toward home cover.
-            if (!e.huddled) {
-                if (e.ally) |ai| {
-                    if (e.ally_dist > 22) {
-                        turn = steerTo(e.heading, e.pos, w.entities.items[ai].pos, 3.6);
+            // During storms, prefer a completed friendly Shelter; otherwise huddle with kin or pull toward home.
+            if (!e.in_shelter) {
+                if (e.near_structure) |si| {
+                    const st = w.structures.items[si];
+                    if (st.complete() and st.kind == .shelter and st.pos.dist(e.pos) > st.radius() * 0.65) {
+                        turn = steerTo(e.heading, e.pos, st.pos, 4.0);
                         seeking_shelter = true;
                     }
-                } else if (!home_rect.contains(e.pos)) {
-                    turn = steerTo(e.heading, e.pos, home_rect.center(), 3.2);
-                    seeking_shelter = true;
+                }
+                if (!seeking_shelter and !e.huddled) {
+                    if (e.ally) |ai| {
+                        if (e.ally_dist > 22) {
+                            turn = steerTo(e.heading, e.pos, w.entities.items[ai].pos, 3.6);
+                            seeking_shelter = true;
+                        }
+                    } else if (!home_rect.contains(e.pos)) {
+                        turn = steerTo(e.heading, e.pos, home_rect.center(), 3.2);
+                        seeking_shelter = true;
+                    }
                 }
             }
         }
 
-        if (!w.forage_only and !acted_on_signal and !seeking_shelter and target == null and e.action == .forage) {
+        // Hungry entities with no food in sight can steer toward a stocked society Food Cache.
+        var seeking_cache = false;
+        if (!w.forage_only and !acted_on_signal and !seeking_shelter and target == null and e.action == .forage and e.visible_food == null and e.energy < 60) {
+            if (e.near_cache) |ci| {
+                const cache = w.structures.items[ci];
+                if (cache.stored_food > 5) {
+                    turn = steerTo(e.heading, e.pos, cache.pos, 4.0);
+                    e.explore_target = null;
+                    seeking_cache = true;
+                }
+            }
+        }
+
+        if (!w.forage_only and !acted_on_signal and !seeking_shelter and !seeking_cache and target == null and e.action == .forage) {
             if (e.visible_food) |fpos| {
                 // Visual lock onto nearby edible food when odour is faint or entity is hungry.
                 if (e.odour < 0.14 or e.energy < 70) {
@@ -1090,7 +1413,7 @@ pub const World = struct {
             e.explore_target = null;
         }
 
-        if (e.explore_target == null and !seeking_shelter and !acted_on_signal and e.visible_food == null) {
+        if (e.explore_target == null and !seeking_shelter and !seeking_cache and !acted_on_signal and e.visible_food == null and target == null) {
             const roam = 160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger;
             const home = home_rect.inset(-roam);
             if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, home_rect.center(), 2.5);
@@ -1098,11 +1421,11 @@ pub const World = struct {
 
         // Resting / sleep state: tired, non-starving beings pause to recover fatigue and save energy.
         if (!w.forage_only) {
-            const danger_near = e.enemies_near > 0 or e.heard_kind == .danger_call or e.action == .fight or e.action == .flee;
+            const danger_near = e.enemies_near > 0 or e.heard_kind == .danger_call or e.action == .fight or e.action == .flee or hunting_prey;
             if (e.resting) {
                 if (e.fatigue <= 0.12 or e.energy < 38 or danger_near) e.resting = false;
             } else if (!danger_near and !e.feeding and e.energy > 48) {
-                const rest_thresh: f32 = if (w.phase == .storm and e.huddled) 0.45 else if (e.energy > 95 and e.since_meal < 15) 0.65 else 0.85;
+                const rest_thresh: f32 = if (e.in_shelter) 0.40 else if (w.phase == .storm and e.huddled) 0.45 else if (e.energy > 95 and e.since_meal < 15) 0.65 else 0.85;
                 if (e.fatigue >= rest_thresh) {
                     e.resting = true;
                     e.explore_target = null;
@@ -1121,11 +1444,12 @@ pub const World = struct {
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
         if (e.action == .flee and e.enemy != null) speed = base * 1.2;
-        if (starving_hunt) speed = @max(speed, base * 1.12);
-        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or acted_on_signal) {
+        if (starving_hunt or hunting_prey) speed = @max(speed, base * 1.12);
+        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or seeking_cache or acted_on_signal or target != null) {
             speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
         }
-        if (w.phase == .storm and e.huddled and !e.feeding and e.energy > 50) speed *= 0.45;
+        if (e.carrying != .none) speed *= 0.88;
+        if (w.phase == .storm and (e.huddled or e.in_shelter) and !e.feeding and e.energy > 50) speed *= 0.45;
         if (e.resting) speed = 0;
 
         e.feeding = false;
@@ -1142,13 +1466,18 @@ pub const World = struct {
                     e.heard_kind = null;
                     speed *= 0.2;
                     const fskill = e.skill(.foraging);
-                    const bite = @min(r.amount, 30 * (1 + 0.35 * fskill) * m.feed * dt);
+                    const basket_mult: f32 = if (e.tool == .basket) 1.35 else 1.0;
+                    const bite = @min(r.amount, 30 * (1 + 0.35 * fskill) * basket_mult * m.feed * dt);
                     r.amount -= bite;
                     const gained = bite * value * (1 + 0.25 * fskill);
                     e.energy = @min(max_energy, e.energy + gained);
                     e.food_eaten += gained;
                     e.since_meal = 0;
                     e.addSkill(.foraging, bite * 0.004);
+                    if (e.tool == .basket) {
+                        e.tool_durability -= 1.5 * dt;
+                        if (e.tool_durability <= 0) e.tool = .none;
+                    }
                     e.genome.cog.learn(gained * 0.06);
                     if (w.rng().float(f32) < bite * 0.006) _ = e.genome.cog.sproutFromExperience(w.rng());
                     // Food Call (waggle-dance style): share rich food locations with hungry kin nearby.
@@ -1169,9 +1498,9 @@ pub const World = struct {
                 w.emitSignal(i, .mate_call, e.pos);
             }
         }
-        // Physical crosswind during storms (huddled kin or home territory resist most of the wind).
+        // Physical crosswind during storms (completed shelters block 90%, huddled kin block 80%).
         const wind_scale: f32 = if (w.phase == .storm and !w.forage_only)
-            (if (e.huddled or e.resting) @as(f32, 0.2) else if (home_rect.contains(e.pos)) @as(f32, 0.5) else 1.0)
+            (if (e.in_shelter) @as(f32, 0.1) else if (e.huddled or e.resting) @as(f32, 0.2) else if (home_rect.contains(e.pos)) @as(f32, 0.5) else 1.0)
         else
             0;
         const step_x = (@cos(e.heading) * speed + e.bump_vel.x + 14 * wind_scale) * dt;
@@ -1181,11 +1510,13 @@ pub const World = struct {
         const moved = @sqrt(step_x * step_x + step_y * step_y);
         e.distance_traveled += moved;
         if (e.resting) {
-            e.fatigue = @max(0, e.fatigue - 0.11 * dt);
+            const rest_rate: f32 = if (e.in_shelter) 0.19 else 0.11;
+            e.fatigue = @max(0, e.fatigue - rest_rate * dt);
         } else {
             const fatigue_gain = (0.008 + 0.0005 * @abs(speed)) * (1 - 0.35 * g.trait(.efficiency));
             e.fatigue = @min(1, e.fatigue + fatigue_gain * dt);
         }
+        if (e.in_shelter and !w.forage_only) e.addSkill(.building, 0.002 * dt);
         if (!e.feeding and !e.resting) {
             const nav_mult: f32 = if (home_rect.contains(e.pos)) 1.0 else 2.0;
             e.addSkill(.navigation, moved * 0.00014 * nav_mult);
@@ -1205,27 +1536,154 @@ pub const World = struct {
             w.field.deposit(trailChannel(e.society), e.pos.x, e.pos.y, g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt);
         }
 
-        // Metabolism, harsher in hard environments and during world storms; resting & huddling conserve energy.
+        // Metabolism, harsher in hard environments and during world storms; shelters, resting & huddling conserve energy.
         // Larger cognitive brains also carry a small real metabolic upkeep so only useful growth survives selection.
-        const shelter_mult: f32 = if (w.phase == .storm and e.huddled) 0.55 else 1.0;
+        const shelter_mult: f32 = if (e.in_shelter) 0.35 else if (w.phase == .storm and e.huddled) 0.55 else 1.0;
         const rest_mult: f32 = if (e.resting) 0.45 else 1.0;
         const harsh = (if (home_rect.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * shelter_mult;
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
+        const carry_cost: f32 = if (e.carrying != .none) 0.12 else 0;
         const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0003 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
-        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult;
+        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult;
         e.energy -= drain * dt;
         if (e.energy < 25) e.genome.cog.learn(-0.08 * dt);
 
-        // Combat (within physical reach); combat skill improves both offense and defense.
+        // Emergent material gathering, tool-crafting, stigmergic building, cache use, and wild prey hunting.
+        if (!w.forage_only and e.dead == null) {
+            // 1. Pick up raw material (wood/stone) when gathering, crafting, or building.
+            if (e.carrying == .none and (e.action == .gather or e.action == .craft_tool or e.action == .build)) {
+                if (e.near_material) |mi| {
+                    const mat = &w.materials.items[mi];
+                    if (mat.amount > 0 and mat.pos.dist(e.pos) < e.radius() + 14) {
+                        mat.amount -= 15;
+                        e.carrying = if (mat.kind == .wood) .wood else .stone;
+                        e.genome.cog.learn(0.25);
+                    }
+                }
+            }
+
+            // 2. Craft a tool from carried material (stone -> Spear, wood -> Basket).
+            const want_craft = e.carrying != .none and e.craft_cooldown <= 0 and e.energy > 45 and
+                (e.action == .craft_tool or (e.action == .gather and e.carrying == .stone and e.tool == .none));
+            if (want_craft) {
+                e.craft_cooldown = 4.0;
+                e.energy -= 2.5;
+                const chance = 0.35 + 0.65 * e.skill(.toolcraft);
+                if (w.rng().float(f32) < chance) {
+                    e.tool = if (e.carrying == .stone) .spear else .basket;
+                    e.tool_durability = 100;
+                    e.carrying = .none;
+                    e.addSkill(.toolcraft, 0.28);
+                    e.genome.cog.learn(0.95);
+                    _ = e.genome.cog.sproutFromExperience(w.rng());
+                    const st = &w.stats[e.society];
+                    st.tools_crafted += 1;
+                    if (!st.discovered_tools) {
+                        st.discovered_tools = true;
+                        w.pushEvent(e.society, .tool_discovered, st.tools_crafted);
+                    }
+                } else {
+                    // Trial-and-error learning: failed attempts still build toolcraft intuition.
+                    e.addSkill(.toolcraft, 0.10);
+                    e.genome.cog.learn(0.15);
+                }
+            }
+
+            // 3. Stigmergic building & repair: contribute carried wood/stone to a structure or start a foundation.
+            const want_build = e.carrying != .none and e.energy > 42 and
+                (e.action == .build or (e.action == .gather and (e.carrying == .wood or e.tool != .none)));
+            if (want_build) {
+                try w.tryBuild(i);
+            }
+
+            // 4. Food Cache storage (deposit surplus when well-fed, withdraw when hungry).
+            if (e.near_cache) |ci| {
+                const cache = &w.structures.items[ci];
+                if (cache.complete() and cache.pos.dist(e.pos) < cache.radius() + 10) {
+                    if (e.energy > 96 and cache.stored_food < max_cache_food - 10 and e.craft_cooldown <= 0) {
+                        const add: f32 = if (e.tool == .basket) 32 else 22;
+                        cache.stored_food = @min(max_cache_food, cache.stored_food + add);
+                        e.energy -= 12;
+                        e.craft_cooldown = 3.5;
+                        e.addSkill(.care, 0.08);
+                        e.genome.cog.learn(0.5);
+                    } else if (e.energy < 62 and cache.stored_food > 0) {
+                        const take = @min(cache.stored_food, 28 * dt);
+                        cache.stored_food -= take;
+                        e.energy = @min(max_energy, e.energy + take);
+                        e.food_eaten += take;
+                        e.since_meal = 0;
+                        e.feeding = true;
+                        e.genome.cog.learn(0.4 * dt);
+                    }
+                }
+            }
+
+            // 5. Wild Prey hunting (Spears grant long safe reach, high damage, stagger, and bigger harvest!).
+            if (hunting_prey) {
+                if (e.near_prey) |pi| {
+                    const pr = &w.prey.items[pi];
+                    const has_spear = e.tool == .spear;
+                    const hreach = e.radius() + 14 + (if (has_spear) @as(f32, 12) else 0);
+                    if (pr.hp > 0 and pr.pos.dist(e.pos) < hreach) {
+                        const tskill = e.skill(.toolcraft);
+                        const dmg = if (has_spear)
+                            (22 + 26 * g.trait(.aggression)) * (1 + 0.5 * tskill + 0.3 * e.skill(.combat)) * dt
+                        else
+                            (8 + 14 * g.trait(.aggression)) * (1 + 0.25 * e.skill(.combat)) * dt;
+                        pr.hp -= dmg;
+                        pr.flee_timer = 3.0;
+                        pr.heading = std.math.atan2(pr.pos.y - e.pos.y, pr.pos.x - e.pos.x);
+                        e.energy -= 2.5 * dt;
+                        if (has_spear) {
+                            pr.stagger_timer = 1.6;
+                            e.addSkill(.toolcraft, 0.06 * dt);
+                            e.tool_durability -= 4.0 * dt;
+                            if (e.tool_durability <= 0) e.tool = .none;
+                        } else {
+                            // Unarmed hunter takes counter-kick damage from wild quarry.
+                            e.energy -= 6.5 * dt;
+                            e.addSkill(.combat, 0.04 * dt);
+                        }
+                        if (e.call_cooldown <= 0 and has_spear) w.emitSignal(i, .food_found, pr.pos);
+                        if (pr.hp <= 0) {
+                            e.kills += 1;
+                            e.addSkill(.toolcraft, 0.16);
+                            e.addSkill(.combat, 0.08);
+                            e.genome.cog.learn(1.2);
+                            _ = e.genome.cog.sproutFromExperience(w.rng());
+                            w.stats[e.society].prey_hunted += 1;
+                            // Rich harvest: universal + meat piles so any society benefits from hunting!
+                            const meat_amt: f32 = if (has_spear) 60 else 42;
+                            try w.resources.append(w.gpa, .{ .pos = pr.pos, .food = .meat, .amount = meat_amt, .patch = null, .corpse = false });
+                            try w.resources.append(w.gpa, .{ .pos = .{ .x = pr.pos.x + 8, .y = pr.pos.y - 6 }, .food = .universal, .amount = 36, .patch = null, .corpse = false });
+                            try w.resources.append(w.gpa, .{ .pos = .{ .x = pr.pos.x - 8, .y = pr.pos.y + 6 }, .food = .universal, .amount = 36, .patch = null, .corpse = false });
+                            w.field.deposit(scentChannel(.universal), pr.pos.x, pr.pos.y, 3.0);
+                            w.field.deposit(scentChannel(.meat), pr.pos.x, pr.pos.y, 3.0);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Combat (within physical reach); combat skill and Stone Spears improve offense & reach.
         if (e.action == .fight) {
             if (e.enemy) |oi| {
                 const o = &w.entities.items[oi];
-                if (o.dead == null and o.pos.dist(e.pos) < e.radius() + o.radius() + 4) {
-                    const atk = (8 + 22 * g.trait(.aggression)) * (1 + 0.4 * e.skill(.combat));
+                const has_spear = e.tool == .spear;
+                const creach = e.radius() + o.radius() + (if (has_spear) @as(f32, 14) else 4);
+                if (o.dead == null and o.pos.dist(e.pos) < creach) {
+                    const spear_mult: f32 = if (has_spear) 1.55 + 0.35 * e.skill(.toolcraft) else 1.0;
+                    const atk = (8 + 22 * g.trait(.aggression)) * (1 + 0.4 * e.skill(.combat)) * spear_mult;
                     const dmg = atk * (1 - 0.3 * o.skill(.combat)) * dt;
                     o.energy -= dmg;
                     e.energy -= 3 * dt;
                     e.addSkill(.combat, dt * 0.05);
+                    if (has_spear) {
+                        e.addSkill(.toolcraft, dt * 0.04);
+                        e.tool_durability -= 5.0 * dt;
+                        if (e.tool_durability <= 0) e.tool = .none;
+                    }
                     o.addSkill(.combat, dt * 0.03);
                     o.genome.cog.learn(-dmg * 0.12);
                     if (!w.forage_only and o.call_cooldown <= 0) w.emitSignal(oi, .danger_call, e.pos);
@@ -1244,7 +1702,7 @@ pub const World = struct {
                                 w.pushEvent(e.society, .cannibalism, st.cannibal_kills);
                             }
                         }
-                        try w.kill(oi, .killed);
+                        try w.killCorpse(oi, .killed, if (has_spear) 50 else 30);
                     }
                 }
             }
@@ -1264,13 +1722,85 @@ pub const World = struct {
         }
     }
 
+    fn tryBuild(w: *World, i: usize) !void {
+        const e = &w.entities.items[i];
+        const bskill = e.skill(.building);
+        // 1. Stigmergy: contribute to a nearby incomplete or damaged friendly structure.
+        if (e.near_structure) |si| {
+            const st = &w.structures.items[si];
+            if ((!st.complete() or st.integrity < 85) and st.pos.dist(e.pos) < st.radius() + 18) {
+                const was_complete = st.complete();
+                if (!was_complete) {
+                    st.progress = @min(100, st.progress + 34 + 28 * bskill);
+                } else {
+                    st.integrity = @min(100, st.integrity + 35 + 20 * bskill);
+                }
+                e.carrying = .none;
+                e.energy -= 2.0;
+                e.addSkill(.building, 0.28);
+                e.genome.cog.learn(0.85);
+                _ = e.genome.cog.sproutFromExperience(w.rng());
+                if (!was_complete and st.complete()) {
+                    const stats = &w.stats[e.society];
+                    stats.structures_built += 1;
+                    if (!stats.discovered_building) {
+                        stats.discovered_building = true;
+                        w.pushEvent(e.society, .building_discovered, @backingInt(st.kind));
+                    }
+                }
+                return;
+            }
+        }
+        // 2. Start a new foundation inside territory or near strong kin trail if spaced clear of others.
+        const in_home = w.territories[e.society].contains(e.pos);
+        const kin_trail = w.field.sample(trailChannel(e.society), e.pos.x, e.pos.y);
+        if (!in_home and kin_trail < 0.25) return;
+
+        var soc_count: usize = 0;
+        var shelters: usize = 0;
+        var caches: usize = 0;
+        for (w.structures.items) |st| {
+            if (st.integrity <= 0) continue;
+            if (st.pos.dist(e.pos) < 88) return; // keep structures cleanly spaced
+            if (st.society == e.society) {
+                soc_count += 1;
+                if (st.kind == .shelter) shelters += 1 else caches += 1;
+            }
+        }
+        if (soc_count >= max_structures_per_society) return;
+
+        // Stone naturally forms sturdy Shelters; wood forms Food Caches when needed or light Shelters.
+        const kind: StructureKind = if (e.carrying == .stone)
+            .shelter
+        else if (caches < shelters or caches == 0)
+            .cache
+        else
+            .shelter;
+        try w.structures.append(w.gpa, .{
+            .pos = e.pos,
+            .society = e.society,
+            .kind = kind,
+            .progress = 34 + 20 * bskill,
+            .builder_id = e.id,
+        });
+        e.carrying = .none;
+        e.energy -= 2.5;
+        e.addSkill(.building, 0.14);
+        e.genome.cog.learn(0.65);
+        _ = e.genome.cog.sproutFromExperience(w.rng());
+    }
+
     fn kill(w: *World, i: usize, cause: Death) !void {
+        try w.killCorpse(i, cause, 30);
+    }
+
+    fn killCorpse(w: *World, i: usize, cause: Death, corpse_amount: f32) !void {
         const e = &w.entities.items[i];
         e.dead = cause;
         w.stats[e.society].deaths[@backingInt(cause)] += 1;
         w.field.deposit(alarmChannel(e.society), e.pos.x, e.pos.y, 8);
         if (cause != .old_age or w.rng().boolean()) {
-            try w.resources.append(w.gpa, .{ .pos = e.pos, .food = .meat, .amount = 30, .patch = null, .corpse = true });
+            try w.resources.append(w.gpa, .{ .pos = e.pos, .food = .meat, .amount = corpse_amount, .patch = null, .corpse = true });
         }
     }
 
@@ -1517,7 +2047,7 @@ pub const World = struct {
         sender.call_cooldown = if (kind == .danger_call) 10.0 else 4.5;
         sender.last_sent = kind;
         sender.energy = @max(1, sender.energy - 0.25);
-        sender.addSkill(.care, 0.02);
+        sender.addSkill(.care, 0.004);
         w.stats[soc].signals_sent += 1;
 
         const sig = Signal{ .pos = pos, .target = target, .kind = kind, .society = soc, .radius = radius };
@@ -1684,11 +2214,11 @@ pub const World = struct {
             // Antennation: a recently fed kin leaves a quick trail cue for a hungry kin.
             if (a.since_meal < 8 and b.since_meal > 10) {
                 w.field.deposit(trailChannel(a.society), mid.x, mid.y, 0.8);
-                a.addSkill(.care, 0.015);
+                a.addSkill(.care, 0.006);
                 w.addContact(mid, .kin_greet, a.society);
             } else if (b.since_meal < 8 and a.since_meal > 10) {
                 w.field.deposit(trailChannel(b.society), mid.x, mid.y, 0.8);
-                b.addSkill(.care, 0.015);
+                b.addSkill(.care, 0.006);
                 w.addContact(mid, .kin_greet, b.society);
             }
             return;
@@ -1765,7 +2295,7 @@ pub const World = struct {
                 taught = true;
             }
         }
-        if (taught) mentor.addSkill(.care, 0.015);
+        if (taught) mentor.addSkill(.care, 0.006);
     }
 };
 

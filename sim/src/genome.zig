@@ -31,13 +31,13 @@ pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 ///   0 .. social_inputs-1                     : sensory / state inputs
 ///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable hidden neurons
 ///   out_base .. max_cog_nodes-1              : action output neurons
-pub const social_inputs = 12;
-pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee };
+pub const social_inputs = 16;
+pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
 pub const social_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
 pub const max_cog_hidden = 24;
 pub const out_base = social_inputs + max_cog_hidden;
 pub const max_cog_nodes = out_base + social_outputs;
-pub const max_cog_synapses = 192;
+pub const max_cog_synapses = 224;
 
 pub const Synapse = struct {
     from: u8,
@@ -73,14 +73,18 @@ pub const CognitiveBrain = struct {
     pub fn random(rng: Random) CognitiveBrain {
         var b = CognitiveBrain{ .hidden_count = 4 };
         for (&b.bias) |*v| v.* = rng.floatNorm(f32) * 0.25;
-        // Founders lean toward foraging; evolution & plasticity shape other strategies.
-        b.bias[max_cog_hidden + @backingInt(SocialAction.forage)] += 1.4;
+        // Founders lean toward foraging; curious individuals stumble onto gathering,
+        // tool-crafting, and building and lock them in through reward plasticity.
+        b.bias[max_cog_hidden + @backingInt(SocialAction.forage)] += 1.35;
+        b.bias[max_cog_hidden + @backingInt(SocialAction.gather)] += 0.15;
+        b.bias[max_cog_hidden + @backingInt(SocialAction.craft_tool)] += 0.10;
+        b.bias[max_cog_hidden + @backingInt(SocialAction.build)] += 0.10;
 
-        // Compact starter wiring: sparse input -> hidden (~3 per hidden) and hidden -> output.
+        // Compact starter wiring: sparse input -> hidden and hidden -> output.
         for (0..b.hidden_count) |hi| {
             const h_node: u8 = @intCast(social_inputs + hi);
             for (0..social_inputs) |ii| {
-                if (rng.float(f32) < 0.45) {
+                if (rng.float(f32) < 0.42) {
                     _ = b.insertSynapse(@intCast(ii), h_node, rng.floatNorm(f32) * 0.6);
                 }
             }

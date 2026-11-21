@@ -409,11 +409,76 @@ fn drawWorld(app: *App) void {
         rl.DrawTexturePro(app.field_tex, src, dst, .{ .x = 0, .y = 0 }, 0, rgb(255, 255, 255));
     }
 
+    // Persistent stigmergic structures (Shelters & Food Caches) drawn beneath creatures.
+    for (w.structures.items) |st| {
+        if (st.integrity <= 0) continue;
+        const sc = societyColor(sim.societies[st.society]);
+        const c = v2(st.pos);
+        const r = st.radius();
+        const done = st.complete();
+        const line_w = (if (done) @as(f32, 2.2) else 1.2) / @max(zoom, 0.5);
+        switch (st.kind) {
+            .shelter => {
+                rl.DrawPoly(c, 6, r, 30, withAlpha(sc, if (done) 28 else 11));
+                rl.DrawPolyLinesEx(c, 6, r, 30, line_w, withAlpha(sc, if (done) 165 else 85));
+                if (done) {
+                    rl.DrawPolyLinesEx(c, 6, r * 0.55, 30, 1.0 / @max(zoom, 0.5), withAlpha(rgb(235, 240, 255), 55));
+                }
+            },
+            .cache => {
+                const rr = rect(c.x - r * 0.65, c.y - r * 0.65, r * 1.3, r * 1.3);
+                rl.DrawRectangleRounded(rr, 0.25, 4, withAlpha(sc, if (done) 30 else 12));
+                rl.DrawRectangleRoundedLinesEx(rr, 0.25, 4, line_w, withAlpha(sc, if (done) 175 else 85));
+                if (done) {
+                    const frac = std.math.clamp(st.stored_food / sim.max_cache_food, 0, 1);
+                    rl.DrawRectangleRec(rect(c.x - 14, c.y - 3, 28, 6), rgb(24, 28, 40));
+                    rl.DrawRectangleRec(rect(c.x - 14, c.y - 3, 28 * frac, 6), rgb(255, 220, 75));
+                }
+            },
+        }
+        if (!done) {
+            const pfrac = std.math.clamp(st.progress / 100, 0, 1);
+            rl.DrawRectangleRec(rect(c.x - 14, c.y - 2, 28, 4), rgb(24, 28, 40));
+            rl.DrawRectangleRec(rect(c.x - 14, c.y - 2, 28 * pfrac, 4), withAlpha(sc, 210));
+        }
+    }
+
+    // Raw material nodes (wood timber & flint stone).
+    for (w.materials.items) |mat| {
+        if (mat.amount <= 0) continue;
+        const c = v2(mat.pos);
+        const sc_sz = 3.2 + 2.2 * std.math.clamp(mat.amount / 45, 0.3, 1);
+        switch (mat.kind) {
+            .wood => {
+                rl.DrawRectangleRounded(rect(c.x - sc_sz, c.y - sc_sz * 0.55, sc_sz * 2, sc_sz * 1.1), 0.35, 4, rgb(176, 122, 68));
+                rl.DrawRectangleRoundedLinesEx(rect(c.x - sc_sz, c.y - sc_sz * 0.55, sc_sz * 2, sc_sz * 1.1), 0.35, 4, 1.0 / @max(zoom, 0.5), rgb(96, 62, 32));
+            },
+            .stone => {
+                rl.DrawPoly(c, 5, sc_sz * 1.05, 18, rgb(156, 168, 186));
+                rl.DrawPolyLinesEx(c, 5, sc_sz * 1.05, 18, 1.0 / @max(zoom, 0.5), rgb(86, 96, 114));
+            },
+        }
+    }
+
     for (w.resources.items) |r| {
         if (r.amount <= 0) continue;
         const radius = 2 + 3 * @sqrt(@min(r.amount, 40) / 40);
         const col = if (r.corpse) rgb(150, 40, 40) else foodColor(r.food);
         rl.DrawCircleV(v2(r.pos), radius, col);
+    }
+
+    // Wild Prey (tough frontier quarry that rewards spears & group hunting).
+    for (w.prey.items) |pr| {
+        if (pr.hp <= 0) continue;
+        const c = v2(pr.pos);
+        const deg = pr.heading * 180 / std.math.pi;
+        rl.DrawPoly(c, 6, 12, deg, rgb(212, 152, 72));
+        rl.DrawPolyLinesEx(c, 6, 12, deg, 1.8 / @max(zoom, 0.5), rgb(255, 224, 155));
+        rl.DrawLineEx(c, .{ .x = c.x + 12 * @cos(pr.heading), .y = c.y + 12 * @sin(pr.heading) }, 1.8 / @max(zoom, 0.5), rgb(85, 50, 18));
+        if (pr.hp < pr.max_hp) {
+            rl.DrawRectangleRec(rect(c.x - 12, c.y - 18, 24, 3), rgb(35, 35, 42));
+            rl.DrawRectangleRec(rect(c.x - 12, c.y - 18, 24 * std.math.clamp(pr.hp / pr.max_hp, 0, 1), 3), rgb(245, 95, 75));
+        }
     }
 
     const selected = if (app.selected) |id| w.findById(id) else null;
@@ -521,6 +586,23 @@ fn drawEntity(e: *const sim.Entity, zoom: f32, selected: bool) void {
         },
     }
     if (e.feeding) rl.DrawCircleV(.{ .x = c.x + size * @cos(e.heading), .y = c.y + size * @sin(e.heading) }, 2, rgb(255, 255, 255));
+    // Visible carried materials & crafted tools (Spear / Basket).
+    if (e.carrying != .none) {
+        const carry_col = if (e.carrying == .wood) rgb(186, 130, 74) else rgb(175, 188, 208);
+        const sx = c.x + size * 0.9 * @cos(e.heading + 0.9);
+        const sy = c.y + size * 0.9 * @sin(e.heading + 0.9);
+        rl.DrawCircleV(.{ .x = sx, .y = sy }, 2.6, carry_col);
+    }
+    if (e.tool == .spear) {
+        const tip = rl.Vector2{ .x = c.x + (size + 9) * @cos(e.heading), .y = c.y + (size + 9) * @sin(e.heading) };
+        const hilt = rl.Vector2{ .x = c.x + size * 0.4 * @cos(e.heading), .y = c.y + size * 0.4 * @sin(e.heading) };
+        rl.DrawLineEx(hilt, tip, 1.8 / @max(zoom, 0.55), rgb(235, 242, 255));
+        rl.DrawCircleV(tip, 1.8, rgb(255, 245, 190));
+    } else if (e.tool == .basket) {
+        const bx = c.x - size * 0.85 * @cos(e.heading);
+        const by = c.y - size * 0.85 * @sin(e.heading);
+        rl.DrawCircleV(.{ .x = bx, .y = by }, 3.0, rgb(225, 185, 95));
+    }
     if (zoom > 1.2) {
         rl.DrawRectangleRec(rect(c.x - 8, c.y - size - 6, 16, 2), rgb(40, 40, 40));
         rl.DrawRectangleRec(rect(c.x - 8, c.y - size - 6, 16 * std.math.clamp(e.energy / sim.max_energy, 0, 1), 2), energyColor(e.energy));
@@ -843,7 +925,7 @@ fn drawLabPanel(app: *App, sw: f32) !void {
     const px = (sw - pw) * 0.5;
     if (px < 322) return;
     const py: f32 = 52;
-    const ph: f32 = 500;
+    const ph: f32 = 536;
     panel(px, py, pw, ph);
 
     var y = py + 12;
@@ -1028,18 +1110,21 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     const px = (sw - pw) * 0.5;
     if (px < 322) return;
     const py: f32 = 52;
-    const ph: f32 = 344;
+    const ph: f32 = 398;
     panel(px, py, pw, ph);
 
     var y = py + 12;
-    text(px + 14, y, 15, rgb(235, 235, 245), "Experiment Controls - Food, Weather & Spawning (E)", .{});
+    text(px + 14, y, 15, rgb(235, 235, 245), "Experiment Controls - Food, Weather, Hunting & Spawning (E)", .{});
     y += 22;
-    text(px + 14, y, 11, rgb(175, 185, 200), "Food items: {d}   Corpses: {d}   Cannibal kills: T {d} / C {d} / S {d}", .{
+    text(px + 14, y, 11, rgb(175, 185, 200), "Food: {d}   Corpses: {d}   Cannibal: T {d}/C {d}/S {d}   Built: {d}   Tools: {d}   Prey: {d}", .{
         w.foodCount(),
         w.corpseCount(),
         w.stats[0].cannibal_kills,
         w.stats[1].cannibal_kills,
         w.stats[2].cannibal_kills,
+        w.structureCount(),
+        w.toolCount(),
+        w.preyCount(),
     });
     y += 24;
 
@@ -1144,8 +1229,19 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     if (smallBtn(rect(px + 382, y, 128, 24), try std.fmt.bufPrint(&s3, "+All (+{d} each)", .{rqty}), rgb(54, 60, 84))) {
         for (0..sim.society_count) |si| _ = try w.spawnRandomBatch(@intCast(si), rqty);
     }
-    y += 32;
-    text(px + 14, y, 10, rgb(140, 148, 165), "Tip: Clear All Food halts regrowth to test famine survival & emergent cannibalism. Specimen Lab shares Release amount.", .{});
+    y += 34;
+
+    // 4. Knowledge, Tools & Wild Prey
+    text(px + 14, y, 12, rgb(225, 228, 240), "Tools, building & wild prey", .{});
+    y += 18;
+    if (smallBtn(rect(px + 14, y, 148, 24), "Spawn Wild Prey (+3)", rgb(104, 72, 34))) {
+        try w.spawnPrey(3);
+    }
+    if (smallBtn(rect(px + 168, y, 180, 24), "Inspire Pioneers (+Build/Tool)", rgb(44, 76, 86))) {
+        w.inspirePioneers();
+    }
+    y += 30;
+    text(px + 14, y, 10, rgb(140, 148, 165), "By default societies start at 0% build/tool skill and figure it out on their own. Use Inspire to seed pioneers.", .{});
 }
 
 fn smallBtn(r: rl.Rectangle, label: []const u8, base_col: rl.Color) bool {
@@ -1192,7 +1288,7 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
     text(px + 14, y, 12, rgb(210, 215, 230), "Emergent roles (from learned skills)", .{});
     y += 18;
     for (sim.societies, 0..) |s, si| {
-        var counts: [7]u32 = @splat(0);
+        var counts: [sim.role_count]u32 = @splat(0);
         var avg_sk: [sim.skill_count]f32 = @splat(0);
         var n: f32 = 0;
         for (w.entities.items) |e| {
@@ -1203,16 +1299,18 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
         }
         const d = @max(n, 1);
         text(px + 14, y, 12, societyColor(s), "{s}", .{s.name});
-        text(px + 92, y, 11, rgb(185, 190, 205), "foragers {d}  scouts {d}  guards {d}  care {d}  elders {d}", .{
+        text(px + 92, y, 11, rgb(185, 190, 205), "for {d}  sct {d}  grd {d}  car {d}  bld {d}  hnt {d}  eld {d}", .{
             counts[@backingInt(sim.Role.forager)],
             counts[@backingInt(sim.Role.scout)],
             counts[@backingInt(sim.Role.guard)],
             counts[@backingInt(sim.Role.caretaker)],
+            counts[@backingInt(sim.Role.builder)],
+            counts[@backingInt(sim.Role.hunter)],
             counts[@backingInt(sim.Role.elder)],
         });
         y += 15;
-        text(px + 92, y, 10, rgb(140, 148, 165), "avg skills: forage {d:.0}%  nav {d:.0}%  combat {d:.0}%  care {d:.0}%", .{
-            avg_sk[0] / d * 100, avg_sk[1] / d * 100, avg_sk[2] / d * 100, avg_sk[3] / d * 100,
+        text(px + 92, y, 10, rgb(140, 148, 165), "skills: for {d:.0}% nav {d:.0}% cmb {d:.0}% car {d:.0}% bld {d:.0}% tool {d:.0}%", .{
+            avg_sk[0] / d * 100, avg_sk[1] / d * 100, avg_sk[2] / d * 100, avg_sk[3] / d * 100, avg_sk[4] / d * 100, avg_sk[5] / d * 100,
         });
         y += 17;
     }
@@ -1271,6 +1369,8 @@ fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
         .hybrid_majority => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Hybrids now lead {s} ({d} pop)", .{ mins, secs, name, ev.value }),
         .territory_clash => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} & {s} contesting territory!", .{ mins, secs, name, sim.societies[@min(ev.value, sim.society_count - 1)].name }),
         .cannibalism => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Cannibalism emerged in {s} ({d} kills)!", .{ mins, secs, name, ev.value }),
+        .tool_discovered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} discovered tool-making!", .{ mins, secs, name }),
+        .building_discovered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} built their first {s}!", .{ mins, secs, name, if (ev.value == 0) "shelter" else "food cache" }),
         .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom - abundant food growth", .{ mins, secs }),
         .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
@@ -1281,6 +1381,7 @@ fn eventColor(ev: sim.WorldEvent) rl.Color {
         .endangered, .territory_clash => rgb(250, 185, 70),
         .critical, .extinct => rgb(255, 85, 75),
         .cannibalism => rgb(255, 75, 125),
+        .tool_discovered, .building_discovered => rgb(110, 230, 235),
         .recovered, .boom, .world_bloom => rgb(100, 235, 145),
         .milestone_gen => societyColor(sim.societies[ev.society]),
         .first_hybrid, .hybrid_majority => rgb(255, 220, 70),
@@ -1290,7 +1391,7 @@ fn eventColor(ev: sim.WorldEvent) rl.Color {
 
 fn drawKey(app: *App, x: f32, top: f32) void {
     const w: f32 = 300;
-    const h: f32 = 304;
+    const h: f32 = 368;
     panel(x, top, w, h);
 
     var y = top + 10;
@@ -1379,6 +1480,19 @@ fn drawKey(app: *App, x: f32, top: f32) void {
     y += 17;
     drawMultiGlowSwatch(x + 22, y + 6, &.{ rgb(255, 107, 107), rgb(78, 205, 160), rgb(255, 235, 59) });
     text(x + 34, y, 11, rgb(175, 180, 195), "Food scent (food colour)", .{});
+    y += 22;
+
+    text(x + 12, y, 12, rgb(215, 220, 232), "Materials, tools & structures", .{});
+    y += 17;
+    rl.DrawRectangleRounded(rect(x + 17, y + 3, 10, 6), 0.35, 4, rgb(176, 122, 68));
+    text(x + 34, y, 11, rgb(175, 180, 195), "Wood / Basket", .{});
+    rl.DrawPoly(.{ .x = x + 158, .y = y + 6 }, 5, 5.5, 18, rgb(156, 168, 186));
+    text(x + 170, y, 11, rgb(175, 180, 195), "Stone / Spear", .{});
+    y += 17;
+    rl.DrawPolyLinesEx(.{ .x = x + 22, .y = y + 6 }, 6, 6, 30, 1.4, rgb(135, 210, 255));
+    text(x + 34, y, 11, rgb(175, 180, 195), "Shelter / Cache", .{});
+    rl.DrawPoly(.{ .x = x + 158, .y = y + 6 }, 6, 6, 0, rgb(212, 152, 72));
+    text(x + 170, y, 11, rgb(175, 180, 195), "Wild Prey", .{});
 }
 
 fn drawMultiGlowSwatch(cx: f32, cy: f32, cols: []const rl.Color) void {
@@ -1423,7 +1537,7 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     const s = sim.societies[e.society];
     const x: f32 = 12;
     var y: f32 = 114;
-    const h: f32 = if (app.show_brain) 654 else 494;
+    const h: f32 = if (app.show_brain) 694 else 534;
     panel(x, y, 300, h);
     y += 8;
     text(x + 12, y, 17, societyColor(s), "{s} #{d}", .{ s.name, e.id });
@@ -1435,6 +1549,8 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     y += 15;
     const suffix: []const u8 = if (e.cannibal_target and e.action == .fight)
         " (hunting kin)"
+    else if (e.in_shelter)
+        " (in shelter)"
     else if (e.resting)
         " (resting)"
     else if (e.feeding)
@@ -1453,7 +1569,9 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     else
         "";
     text(x + 12, y, 11, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), suffix });
-    y += 17;
+    y += 15;
+    text(x + 12, y, 11, rgb(175, 210, 220), "gear: {s} ({d:.0}%)   carrying: {s}", .{ @tagName(e.tool), e.tool_durability, @tagName(e.carrying) });
+    y += 16;
     bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
     y += 18;
 
@@ -1595,6 +1713,9 @@ fn actionColor(a: gen.SocialAction) rl.Color {
         .mate => rgb(255, 120, 220),
         .socialize => rgb(120, 200, 255),
         .flee => rgb(255, 200, 80),
+        .gather => rgb(195, 150, 95),
+        .craft_tool => rgb(140, 235, 235),
+        .build => rgb(145, 225, 130),
     };
 }
 

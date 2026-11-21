@@ -306,7 +306,7 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
     // Run a decision then apply positive reward: weights on active paths should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0 });
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0 });
     var before: f32 = 0;
     for (brain.synapses[0..brain.synapse_count]) |s| if (s.active) {
         before += @abs(s.weight);
@@ -456,6 +456,7 @@ test "world: clearAllFood halts regrowth, floodFood populates, setPhase jumps we
     try std.testing.expect(w.foodCount() > 50);
 
     w.clearAllFood();
+    w.prey.clearRetainingCapacity();
     try std.testing.expectEqual(@as(u32, 0), w.foodCount());
     try std.testing.expectEqual(sim.Scarcity.none, w.scarcity);
     // Step 5 seconds: zero food should regrow when scarcity is .none.
@@ -517,4 +518,81 @@ test "world: starvation cannibalism emerges when all food is removed" {
     // Survivor should have eaten from the fallen kin's corpse.
     try std.testing.expect(w.entities.items.len == 1);
     try std.testing.expect(w.entities.items[0].food_eaten > 1.0);
+}
+
+test "world: entities craft stone spears and hunt wild prey for a rich harvest" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 2027);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    while (w.entities.items.len > 1) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    const hunter = &w.entities.items[0];
+    hunter.society = 1;
+    hunter.age = 50;
+    hunter.energy = 85;
+    hunter.pos = .{ .x = 0, .y = 0 };
+    hunter.carrying = .stone;
+    hunter.skills[@backingInt(sim.Skill.toolcraft)] = 0.8;
+    hunter.genome.traits[@backingInt(gen.Trait.aggression)] = 0.9;
+    hunter.genome.traits[@backingInt(gen.Trait.speed)] = 0.95;
+    hunter.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.craft_tool)] = 4.0;
+    try w.prey.append(gpa, .{ .pos = .{ .x = 18, .y = 0 }, .heading = 0, .hp = 45, .max_hp = 90 });
+
+    for (0..60 * 5) |_| try w.step(1.0 / 60.0);
+
+    try std.testing.expect(w.stats[1].tools_crafted >= 1);
+    try std.testing.expect(w.stats[1].discovered_tools);
+    try std.testing.expect(w.stats[1].prey_hunted >= 1);
+    // Hunted wild prey drops rich food items into the world.
+    try std.testing.expect(w.foodCount() >= 2);
+}
+
+test "world: stigmergic shelters protect during storms and food caches feed starving kin" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 2028);
+    w.clearAllFood();
+    w.setPhase(.storm);
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    const home = w.territories[2].center();
+    // Pre-place an almost-finished shelter and a stocked food cache for Squares.
+    try w.structures.append(gpa, .{ .pos = home, .society = 2, .kind = .shelter, .progress = 80, .builder_id = 1 });
+    try w.structures.append(gpa, .{ .pos = .{ .x = home.x + 120, .y = home.y }, .society = 2, .kind = .cache, .progress = 100, .stored_food = 100, .builder_id = 1 });
+
+    // Builder finishes the shelter from carried stone; hungry kin eats from the Food Cache despite 0 world food!
+    const bld = &w.entities.items[0];
+    bld.society = 2;
+    bld.age = 50;
+    bld.energy = 100;
+    bld.pos = home;
+    bld.carrying = .stone;
+    bld.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.build)] = 4.0;
+
+    const hungry = &w.entities.items[1];
+    hungry.society = 2;
+    hungry.age = 50;
+    hungry.energy = 42;
+    hungry.pos = .{ .x = home.x + 125, .y = home.y };
+
+    for (0..60 * 3) |_| try w.step(1.0 / 60.0);
+
+    try std.testing.expect(w.stats[2].structures_built >= 1);
+    try std.testing.expect(w.stats[2].discovered_building);
+    try std.testing.expect(w.entities.items[0].in_shelter);
+    try std.testing.expect(w.entities.items[1].food_eaten > 10.0);
 }

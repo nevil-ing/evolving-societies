@@ -64,12 +64,15 @@ def main():
             a, b = f(first, k), f(last, k)
             print(f"    {label:<15} {a:.3f} -> {b:.3f} ({b - a:+.3f})")
         print("  Learned skills & cognitive brain (start -> last alive):")
-        for k, label in [
+        skill_cols = [
             ("avg_foraging", "foraging"),
             ("avg_navigation", "navigation"),
             ("avg_combat", "combat"),
             ("avg_care", "care"),
-        ]:
+        ]
+        if "avg_building" in first:
+            skill_cols.extend([("avg_building", "building"), ("avg_toolcraft", "toolcraft")])
+        for k, label in skill_cols:
             print(f"    {label:<15} {f(first, k)*100:5.1f}% -> {f(last, k)*100:5.1f}%")
         print(
             f"    {'cog neurons':<15} {f(first, 'avg_neurons'):5.1f}  -> {f(last, 'avg_neurons'):5.1f}  "
@@ -81,9 +84,15 @@ def main():
         )
         if "signals_sent" in end:
             print(f"  Communication: signals_sent={end['signals_sent']} | kin_responses={end['signals_acted']}")
+        if "structures_built" in end:
+            print(
+                f"  Tools & building: tools_held={last['tools_held']} | "
+                f"structures_built={end['structures_built']} | prey_hunted={end['prey_hunted']}"
+            )
+        extra_roles = f" builders={last['builders']} hunters={last['hunters']}" if "builders" in last else ""
         print(
             f"  Final roles: foragers={last['foragers']} scouts={last['scouts']} "
-            f"guards={last['guards']} caretakers={last['caretakers']} elders={last['elders']}\n"
+            f"guards={last['guards']} caretakers={last['caretakers']}{extra_roles} elders={last['elders']}\n"
         )
 
 

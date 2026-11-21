@@ -39,9 +39,10 @@ pub const RunLogger = struct {
             "time,phase,scarcity,society,pop,hybrids,births,starved,old_age,killed," ++
                 "avg_gen,max_gen,avg_energy," ++
                 "avg_speed,avg_efficiency,avg_aggression,avg_sociability,avg_territoriality,avg_trail_output,avg_adaptability,avg_fertility," ++
-                "avg_foraging,avg_navigation,avg_combat,avg_care," ++
+                "avg_foraging,avg_navigation,avg_combat,avg_care,avg_building,avg_toolcraft," ++
                 "avg_neurons,avg_synapses,outside_home_frac,huddled_frac,active_lineages," ++
-                "foragers,scouts,guards,caretakers,elders,signals_sent,signals_acted,cannibal_kills\n",
+                "foragers,scouts,guards,caretakers,builders,hunters,elders," ++
+                "signals_sent,signals_acted,cannibal_kills,tools_held,structures_built,prey_hunted\n",
         );
         return self;
     }
@@ -79,7 +80,8 @@ pub const RunLogger = struct {
             var synapses: f32 = 0;
             var outside: u32 = 0;
             var huddled: u32 = 0;
-            var roles: [7]u32 = @splat(0);
+            var tools_held: u32 = 0;
+            var roles: [sim.role_count]u32 = @splat(0);
             var lineages: [128]u32 = undefined;
             var lin_count: usize = 0;
 
@@ -95,6 +97,7 @@ pub const RunLogger = struct {
                 synapses += @floatFromInt(e.genome.cog.activeSynapses());
                 if (!w.territories[si].contains(e.pos)) outside += 1;
                 if (e.huddled) huddled += 1;
+                if (e.tool != .none) tools_held += 1;
                 roles[@backingInt(e.role())] += 1;
                 var seen = false;
                 for (lineages[0..lin_count]) |lid| {
@@ -146,12 +149,14 @@ pub const RunLogger = struct {
 
             const s2 = std.fmt.bufPrint(
                 &line,
-                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n",
+                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n",
                 .{
                     skills[0] / d,
                     skills[1] / d,
                     skills[2] / d,
                     skills[3] / d,
+                    skills[4] / d,
+                    skills[5] / d,
                     neurons / d,
                     synapses / d,
                     out_frac,
@@ -161,10 +166,15 @@ pub const RunLogger = struct {
                     roles[@backingInt(sim.Role.scout)],
                     roles[@backingInt(sim.Role.guard)],
                     roles[@backingInt(sim.Role.caretaker)],
+                    roles[@backingInt(sim.Role.builder)],
+                    roles[@backingInt(sim.Role.hunter)],
                     roles[@backingInt(sim.Role.elder)],
                     st.signals_sent,
                     st.signals_acted,
                     st.cannibal_kills,
+                    tools_held,
+                    st.structures_built,
+                    st.prey_hunted,
                 },
             ) catch continue;
             self.writeAll(s2);
