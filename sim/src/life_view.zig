@@ -280,7 +280,22 @@ fn drawWorld(app: *App) void {
     const zoom = app.camera.zoom;
 
     const b = sim.bounds;
-    rl.DrawRectangleRec(rect(b.x, b.y, b.w, b.h), rgb(16, 18, 28));
+    const bg_col: rl.Color = switch (w.phase) {
+        .calm => rgb(16, 18, 28),
+        .bloom => rgb(16, 24, 26),
+        .storm => rgb(13, 16, 30),
+    };
+    rl.DrawRectangleRec(rect(b.x, b.y, b.w, b.h), bg_col);
+    // Subtle coordinate grid so movement & travel across the frontier feel tangible.
+    const grid_col = withAlpha(rgb(255, 255, 255), 8);
+    var gx = b.x + 200;
+    while (gx < b.x + b.w) : (gx += 200) {
+        rl.DrawLineEx(.{ .x = gx, .y = b.y }, .{ .x = gx, .y = b.y + b.h }, 1 / zoom, grid_col);
+    }
+    var gy = b.y + 200;
+    while (gy < b.y + b.h) : (gy += 200) {
+        rl.DrawLineEx(.{ .x = b.x, .y = gy }, .{ .x = b.x + b.w, .y = gy }, 1 / zoom, grid_col);
+    }
     for (sim.societies) |s| {
         const t = s.territory;
         const col = societyColor(s);
@@ -327,6 +342,18 @@ fn drawWorld(app: *App) void {
         }
     }
 
+    if (w.phase == .storm) {
+        // Subtle drifting wind streaks across the world during storm waves.
+        const streak_col = withAlpha(rgb(155, 195, 255), 42);
+        const shift = @mod(w.time * 240, b.w);
+        for (0..36) |k| {
+            const kf: f32 = @floatFromInt(k);
+            const sx = b.x + @mod(kf * 197.3 + shift, b.w);
+            const sy = b.y + @mod(kf * 311.7 + w.time * 45, b.h);
+            rl.DrawLineEx(.{ .x = sx, .y = sy }, .{ .x = sx + 38, .y = sy + 12 }, 1.2 / zoom, streak_col);
+        }
+    }
+
     if (selected) |e| {
         const ant = [2]f32{ e.heading - 0.5, e.heading + 0.5 };
         for (ant) |a| rl.DrawLineEx(v2(e.pos), .{ .x = e.pos.x + 12 * @cos(a), .y = e.pos.y + 12 * @sin(a) }, 1.5 / zoom, rgb(230, 230, 240));
@@ -338,7 +365,12 @@ fn drawWorld(app: *App) void {
             .socialize => if (e.ally) |o| w.entities.items[o].pos else null,
             else => null,
         };
-        if (target) |t| rl.DrawLineEx(v2(e.pos), v2(t), 1.5 / zoom, withAlpha(actionColor(e.action), 160));
+        if (target) |t| {
+            rl.DrawLineEx(v2(e.pos), v2(t), 1.5 / zoom, withAlpha(actionColor(e.action), 160));
+        } else if (e.explore_target) |goal| {
+            rl.DrawLineEx(v2(e.pos), v2(goal), 1.2 / zoom, withAlpha(rgb(95, 220, 210), 110));
+            rl.DrawCircleLinesV(v2(goal), 8 / @max(zoom, 0.4), withAlpha(rgb(95, 220, 210), 170));
+        }
     }
 }
 
@@ -430,7 +462,8 @@ fn drawHud(app: *App) !void {
     var total: u32 = 0;
     for (0..sim.society_count) |s| total += w.population(s);
     text(24, 20, 22, rgb(235, 235, 245), "{d}:{d:0>2}", .{ mins, secs });
-    text(110, 25, 14, rgb(170, 175, 190), "{s}  x{d}", .{ if (app.paused) "PAUSED" else "running", speeds[app.speed] });
+    text(104, 25, 13, rgb(170, 175, 190), "{s} x{d}", .{ if (app.paused) "PAUSED" else "running", speeds[app.speed] });
+    drawPhaseBadge(234, 24, w.phase);
     text(24, 50, 14, rgb(200, 200, 215), "Population {d}   Max generation {d}", .{ total, w.max_generation });
     text(24, 70, 14, rgb(200, 200, 215), "Food: {s}   Overlay: {s}", .{ @tagName(w.scarcity), @tagName(app.overlay) });
 
@@ -651,6 +684,16 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
     }
 }
 
+fn drawPhaseBadge(x: f32, y: f32, p: sim.WorldPhase) void {
+    const label, const bg, const fg = switch (p) {
+        .calm => .{ "CALM", rgb(34, 44, 66), rgb(165, 195, 235) },
+        .bloom => .{ "BLOOM", rgb(26, 74, 50), rgb(120, 240, 165) },
+        .storm => .{ "STORM", rgb(56, 42, 86), rgb(190, 170, 255) },
+    };
+    rl.DrawRectangleRounded(rect(x, y, 64, 17), 0.4, 4, bg);
+    text(x + 8, y + 3, 10, fg, "{s}", .{label});
+}
+
 fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
     const mins: u32 = @intFromFloat(ev.time / 60);
     const secs: u32 = @intFromFloat(@mod(ev.time, 60));
@@ -663,6 +706,8 @@ fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
         .boom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} booming ({d} population)", .{ mins, secs, name, ev.value }),
         .milestone_gen => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} reached Generation {d}", .{ mins, secs, name, ev.value }),
         .first_hybrid => std.fmt.bufPrint(buf, "{d}:{d:0>2}  First {s} hybrid born (Gen {d})", .{ mins, secs, name, ev.value }),
+        .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom — abundant food growth", .{ mins, secs }),
+        .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
 }
 
@@ -670,9 +715,10 @@ fn eventColor(ev: sim.WorldEvent) rl.Color {
     return switch (ev.kind) {
         .endangered => rgb(250, 185, 70),
         .critical, .extinct => rgb(255, 85, 75),
-        .recovered, .boom => rgb(100, 235, 145),
+        .recovered, .boom, .world_bloom => rgb(100, 235, 145),
         .milestone_gen => societyColor(sim.societies[ev.society]),
         .first_hybrid => rgb(255, 220, 70),
+        .world_storm => rgb(175, 155, 255),
     };
 }
 
@@ -820,7 +866,8 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     y += 22;
     text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lineage #{d}  age {d:.0}/{d:.0}s  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age, e.lifespan, e.children, e.kills });
     y += 15;
-    text(x + 12, y, 11, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), if (e.feeding) " (feeding)" else "" });
+    const suffix: []const u8 = if (e.feeding) " (feeding)" else if (e.explore_target != null) " (exploring)" else "";
+    text(x + 12, y, 11, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), suffix });
     y += 17;
     bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
     y += 18;

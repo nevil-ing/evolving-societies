@@ -239,3 +239,22 @@ test "world: skills pass down to offspring and civilization alerts fire" {
     try std.testing.expectEqual(sim.SocietyStatus.endangered, w.stats[1].status);
     try std.testing.expect(w.event_count >= 2);
 }
+
+test "world: adventurous entities travel outside home territory and world phases cycle" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 777);
+    for (0..60 * 70) |_| try w.step(1.0 / 60.0);
+
+    var outside_home: usize = 0;
+    for (w.entities.items) |e| {
+        if (e.dead != null) continue;
+        if (!sim.societies[e.society].territory.contains(e.pos)) outside_home += 1;
+    }
+    try std.testing.expect(outside_home >= 10);
+    // At 70s, world should have progressed through bloom into storm phase.
+    try std.testing.expectEqual(sim.WorldPhase.storm, w.phase);
+}

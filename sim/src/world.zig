@@ -124,7 +124,29 @@ pub const Role = enum(u8) {
 
 pub const SocietyStatus = enum(u8) { thriving, stable, struggling, endangered, extinct };
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid };
+pub const WorldPhase = enum(u8) {
+    calm,
+    bloom,
+    storm,
+
+    pub fn regrowth(p: WorldPhase) f32 {
+        return switch (p) {
+            .calm => 1.0,
+            .bloom => 1.6,
+            .storm => 0.6,
+        };
+    }
+    pub fn harshness(p: WorldPhase) f32 {
+        return switch (p) {
+            .calm => 1.0,
+            .bloom => 0.9,
+            .storm => 1.4,
+        };
+    }
+};
+pub const cycle_length: f32 = 90;
+
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, world_bloom, world_storm };
 
 pub const WorldEvent = struct {
     time: f32,
@@ -189,6 +211,9 @@ pub const Entity = struct {
     escape_timer: f32 = 0,
     bump_vel: Vec2 = .{ .x = 0, .y = 0 },
     bump_cooldown: f32 = 0,
+    explore_target: ?Vec2 = null,
+    explore_timer: f32 = 0,
+    distance_traveled: f32 = 0,
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
@@ -283,6 +308,7 @@ pub const World = struct {
     history_count: usize = 0,
     history_timer: f32 = 0,
     status_timer: f32 = 0,
+    phase: WorldPhase = .calm,
     events: [max_events]WorldEvent = undefined,
     event_count: usize = 0,
     gen_records: [max_gen_records]GenRecord = @splat(.{}),
@@ -326,6 +352,7 @@ pub const World = struct {
         w.history_count = 0;
         w.history_timer = 0;
         w.status_timer = 0;
+        w.phase = .calm;
         w.event_count = 0;
         w.gen_records = @splat(.{});
         w.gen_record_count = 0;
@@ -347,7 +374,7 @@ pub const World = struct {
             for (0..3) |_| try w.addPatch(s.food, s.territory.inset(30));
             try w.addPatch(.universal, s.territory.inset(30));
         }
-        for (0..4) |_| try w.addPatch(.universal, wild);
+        for (0..6) |_| try w.addPatch(.universal, wild);
         for ([_]FoodType{ .meat, .plant, .mineral }) |t| try w.addPatch(t, wild);
         for (w.patches.items, 0..) |*p, i| {
             while (p.live < patch_items) try w.spawnFood(p, @intCast(i));
@@ -457,6 +484,7 @@ pub const World = struct {
         w.status_timer += dt;
         if (w.status_timer >= 1.0) {
             w.status_timer = 0;
+            w.updateWorldPhase();
             w.updateSocietyStatuses();
         }
 
@@ -476,7 +504,7 @@ pub const World = struct {
     }
 
     fn updateFood(w: *World, dt: f32) !void {
-        const rate = w.scarcity.regrowth();
+        const rate = w.scarcity.regrowth() * w.phase.regrowth();
         for (w.patches.items, 0..) |*p, i| {
             if (p.budget <= 0) {
                 if (p.live == 0) w.relocate(p);
@@ -697,12 +725,49 @@ pub const World = struct {
         };
         if (target) |t| turn = steerTo(e.heading, e.pos, t, 5);
 
-        // Stay near home when fed; low territoriality or hunger roams further to find scarce food.
+        // Stay near home when fed and territorial; adventurous or hungry entities roam far out into the wild.
         const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
         if (e.energy < 35 and e.action != .flee) e.action = .forage;
-        const roam = 60 + 400 * (1 - g.trait(.territoriality)) + 500 * hunger;
-        const home = soc.territory.inset(-roam);
-        if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, soc.territory.center(), 3);
+
+        // Adventure / exploration drive: low-territoriality, scout-skilled, or searching entities
+        // launch expeditions across the wider world when not locked onto a local scent.
+        e.explore_timer = @max(0, e.explore_timer - dt);
+        if (!w.forage_only and target == null and e.action == .forage) {
+            if (e.explore_target) |goal| {
+                if (e.pos.dist(goal) < 40 or e.explore_timer <= 0) {
+                    e.explore_target = null;
+                    e.explore_timer = 3 + w.rng().float(f32) * 4;
+                    e.addSkill(.navigation, 0.04);
+                } else if (e.odour < 0.25) {
+                    // Gently steer toward the frontier waypoint while still letting the fly brain
+                    // take over as soon as it picks up a real food scent or trail.
+                    turn = steerTo(e.heading, e.pos, goal, 2.5) + 0.5 * g.motorGene(.wander) * w.rng().floatNorm(f32);
+                }
+            } else if (e.explore_timer <= 0 and e.odour < 0.16) {
+                const wanderlust = (1 - g.trait(.territoriality)) * 0.55 + e.skill(.navigation) * 0.35 +
+                    (if (e.energy > 95) @as(f32, 0.25) else if (e.energy < 45) @as(f32, 0.35) else 0);
+                if (w.rng().float(f32) < wanderlust * 0.65) {
+                    // Pick a distant frontier waypoint anywhere in the world.
+                    var goal = w.randomIn(bounds.inset(90));
+                    var tries: usize = 0;
+                    while (goal.dist(e.pos) < 320 and tries < 5) : (tries += 1) {
+                        goal = w.randomIn(bounds.inset(90));
+                    }
+                    e.explore_target = goal;
+                    e.explore_timer = 14 + w.rng().float(f32) * 12;
+                } else {
+                    e.explore_timer = 2.0;
+                }
+            }
+        } else if (target != null) {
+            e.explore_target = null;
+        }
+
+        if (e.explore_target == null) {
+            const roam = 160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger;
+            const home = soc.territory.inset(-roam);
+            if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, soc.territory.center(), 2.5);
+        }
 
         e.heading += turn * dt;
 
@@ -713,6 +778,7 @@ pub const World = struct {
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
         if (e.action == .flee and e.enemy != null) speed = base * 1.2;
+        if (e.explore_target != null and e.odour < 0.25) speed = @max(speed, base * 0.95);
 
         e.feeding = false;
         if (e.touching) |ri| {
@@ -724,6 +790,7 @@ pub const World = struct {
                 speed *= 0.45;
                 if (m.feed > g.motorGene(.feed_threshold)) {
                     e.feeding = true;
+                    e.explore_target = null;
                     speed *= 0.2;
                     const fskill = e.skill(.foraging);
                     const bite = @min(r.amount, 30 * (1 + 0.35 * fskill) * m.feed * dt);
@@ -736,9 +803,16 @@ pub const World = struct {
                 }
             }
         }
-        e.pos.x += (@cos(e.heading) * speed + e.bump_vel.x) * dt;
-        e.pos.y += (@sin(e.heading) * speed + e.bump_vel.y) * dt;
-        if (!e.feeding) e.addSkill(.navigation, @abs(speed) * dt * 0.00012);
+        const step_x = (@cos(e.heading) * speed + e.bump_vel.x) * dt;
+        const step_y = (@sin(e.heading) * speed + e.bump_vel.y) * dt;
+        e.pos.x += step_x;
+        e.pos.y += step_y;
+        const moved = @sqrt(step_x * step_x + step_y * step_y);
+        e.distance_traveled += moved;
+        if (!e.feeding) {
+            const nav_mult: f32 = if (soc.territory.contains(e.pos)) 1.0 else 2.0;
+            e.addSkill(.navigation, moved * 0.00014 * nav_mult);
+        }
         const damp = @exp(-10 * dt);
         e.bump_vel.x *= damp;
         e.bump_vel.y *= damp;
@@ -754,8 +828,8 @@ pub const World = struct {
             w.field.deposit(trailChannel(e.society), e.pos.x, e.pos.y, g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt);
         }
 
-        // Metabolism, harsher in hard environments; navigation skill lowers travel cost.
-        const harsh = if (soc.territory.contains(e.pos)) soc.harshness else 0.3;
+        // Metabolism, harsher in hard environments and during world storms; navigation skill lowers travel cost.
+        const harsh = (if (soc.territory.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness();
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
         const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost) * (1 + 0.5 * harsh);
         e.energy -= drain * dt;
@@ -881,6 +955,16 @@ pub const World = struct {
         } else {
             std.mem.copyForwards(WorldEvent, w.events[0 .. max_events - 1], w.events[1..]);
             w.events[max_events - 1] = ev;
+        }
+    }
+
+    fn updateWorldPhase(w: *World) void {
+        const t = @mod(w.time, cycle_length);
+        const next: WorldPhase = if (t < 40) .calm else if (t < 65) .bloom else .storm;
+        if (next != w.phase) {
+            w.phase = next;
+            if (next == .bloom) w.pushEvent(0, .world_bloom, 0);
+            if (next == .storm) w.pushEvent(0, .world_storm, 0);
         }
     }
 
