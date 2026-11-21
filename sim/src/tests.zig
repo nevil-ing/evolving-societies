@@ -138,3 +138,64 @@ test "slow: populations across seeds" {
         std.debug.print("seed {d}: gen {d:>3}, population every 75s: {any}\n", .{ seed, w.max_generation, pops });
     }
 }
+
+test "world: entities stay separated and react physically on contact" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 42);
+    // Keep only two rivals placed overlapping head-on.
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    w.entities.items[0].society = 0;
+    w.entities.items[1].society = 1;
+    w.entities.items[0].age = 40;
+    w.entities.items[1].age = 40;
+    w.entities.items[0].pos = .{ .x = 0, .y = 0 };
+    w.entities.items[1].pos = .{ .x = 2, .y = 0 };
+
+    try w.step(1.0 / 60.0);
+    const a = w.entities.items[0];
+    const b = w.entities.items[1];
+    const dist = a.pos.dist(b.pos);
+    try std.testing.expect(dist >= a.radius() + b.radius() - 0.1);
+    try std.testing.expect(w.contact_count > 0);
+    try std.testing.expect(a.bump_cooldown > 0 and b.bump_cooldown > 0);
+}
+
+test "world: hungry adaptable entity eats foreign food instead of passing over it" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 99);
+    w.forage_only = true;
+    w.resources.clearRetainingCapacity();
+    w.patches.clearRetainingCapacity();
+    while (w.entities.items.len > 1) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    const e = &w.entities.items[0];
+    e.society = 1; // Circles (native food: plant)
+    e.hybrid = true; // can eat meat at 50%
+    e.age = 40;
+    e.energy = 30;
+    e.pos = .{ .x = 0, .y = 0 };
+    e.heading = 0;
+    e.genome.traits[@backingInt(gen.Trait.speed)] = 1.0; // fast entity
+    e.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    for (e.genome.fly_gain) |*g| g.* = 1.0;
+
+    // Place an inedible food-like check? No, place foreign meat right ahead of the fast hybrid.
+    try w.resources.append(gpa, .{ .pos = .{ .x = 6, .y = 0 }, .food = .meat, .amount = 40, .patch = null });
+    for (0..60) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items[0].food_eaten > 1.0);
+}

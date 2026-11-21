@@ -308,6 +308,23 @@ fn drawWorld(app: *App) void {
         drawEntity(e, zoom, selected == e);
     }
 
+    for (w.contacts[0..w.contact_count]) |ev| {
+        const t = std.math.clamp(ev.age / sim.contact_duration, 0, 1);
+        const alpha: u8 = @intFromFloat((1 - t) * 210);
+        const col: rl.Color = switch (ev.kind) {
+            .kin_greet => societyColor(sim.societies[ev.society]),
+            .share_food => rgb(110, 245, 160),
+            .rival_clash => rgb(255, 85, 65),
+            .startle => rgb(255, 225, 90),
+            .courtship => rgb(255, 130, 225),
+        };
+        const r = 5 + 14 * t;
+        rl.DrawCircleLinesV(v2(ev.pos), r, withAlpha(col, alpha));
+        if (ev.kind == .share_food or ev.kind == .rival_clash) {
+            rl.DrawCircleLinesV(v2(ev.pos), r * 0.6, withAlpha(col, alpha / 2));
+        }
+    }
+
     if (selected) |e| {
         const ant = [2]f32{ e.heading - 0.5, e.heading + 0.5 };
         for (ant) |a| rl.DrawLineEx(v2(e.pos), .{ .x = e.pos.x + 12 * @cos(a), .y = e.pos.y + 12 * @sin(a) }, 1.5 / zoom, rgb(230, 230, 240));
@@ -325,8 +342,7 @@ fn drawWorld(app: *App) void {
 
 fn drawEntity(e: *const sim.Entity, zoom: f32, selected: bool) void {
     const s = sim.societies[e.society];
-    const grow = 0.55 + 0.45 * @min(1, e.age / sim.maturity_age);
-    const size = 8 * grow;
+    const size = e.radius();
     const health = std.math.clamp(e.energy / 100, 0.25, 1);
     var col = societyColor(s);
     col.r = @intFromFloat(@as(f32, @floatFromInt(col.r)) * health);
@@ -557,7 +573,7 @@ fn drawKey(app: *App, x: f32, top: f32) void {
     const hy = rl.Vector2{ .x = x + 22, .y = y + 6 };
     rl.DrawCircleV(hy, 5.5, rgb(90, 140, 255));
     rl.DrawCircleLinesV(hy, 6.2, rgb(255, 220, 60));
-    text(x + 34, y, 11, rgb(175, 180, 195), "Hybrid (eats any)", .{});
+    text(x + 34, y, 11, rgb(175, 180, 195), "Hybrid (any, 50%)", .{});
     // Fighting outline
     const fg = rl.Vector2{ .x = x + 158, .y = y + 6 };
     rl.DrawPoly(fg, 3, 6.5, -90, rgb(255, 90, 80));
@@ -576,14 +592,23 @@ fn drawKey(app: *App, x: f32, top: f32) void {
 
     text(x + 12, y, 12, rgb(215, 220, 232), "Chemical overlays (P)", .{});
     y += 17;
-    drawGlowSwatch(x + 22, y + 6, rgb(90, 230, 120));
-    text(x + 34, y, 11, rgb(175, 180, 195), "Society trail (laid after eating)", .{});
+    drawMultiGlowSwatch(x + 22, y + 6, &.{ rgb(255, 90, 80), rgb(90, 140, 255), rgb(90, 230, 120) });
+    text(x + 34, y, 11, rgb(175, 180, 195), "Society trail (society colour)", .{});
     y += 17;
     drawGlowSwatch(x + 22, y + 6, rgb(255, 140, 40));
     text(x + 34, y, 11, rgb(175, 180, 195), "Alarm pheromone (fight / death)", .{});
     y += 17;
-    drawGlowSwatch(x + 22, y + 6, rgb(255, 235, 59));
-    text(x + 34, y, 11, rgb(175, 180, 195), "Food scent (in scent overlay)", .{});
+    drawMultiGlowSwatch(x + 22, y + 6, &.{ rgb(255, 107, 107), rgb(78, 205, 160), rgb(255, 235, 59) });
+    text(x + 34, y, 11, rgb(175, 180, 195), "Food scent (food colour)", .{});
+}
+
+fn drawMultiGlowSwatch(cx: f32, cy: f32, cols: []const rl.Color) void {
+    const offsets = [_][2]f32{ .{ -3.5, 0 }, .{ 0, -2.5 }, .{ 3.5, 1 } };
+    for (cols, 0..) |col, i| {
+        const o = offsets[i % offsets.len];
+        rl.DrawCircleV(.{ .x = cx + o[0], .y = cy + o[1] }, 4.5, withAlpha(col, 80));
+        rl.DrawCircleV(.{ .x = cx + o[0], .y = cy + o[1] }, 2.0, withAlpha(col, 210));
+    }
 }
 
 fn drawGlowSwatch(cx: f32, cy: f32, col: rl.Color) void {

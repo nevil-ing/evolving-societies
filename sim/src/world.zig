@@ -104,6 +104,16 @@ pub const Patch = struct {
 
 pub const Death = enum { starved, old_age, killed };
 
+pub const ContactKind = enum { kin_greet, share_food, rival_clash, startle, courtship };
+
+pub const ContactEvent = struct {
+    pos: Vec2,
+    kind: ContactKind,
+    society: u8,
+    age: f32 = 0,
+};
+pub const contact_duration: f32 = 0.45;
+
 pub const Entity = struct {
     id: u32,
     society: u8,
@@ -135,6 +145,8 @@ pub const Entity = struct {
     action: gen.SocialAction = .forage,
     action_timer: f32 = 0,
     escape_timer: f32 = 0,
+    bump_vel: Vec2 = .{ .x = 0, .y = 0 },
+    bump_cooldown: f32 = 0,
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
@@ -148,6 +160,9 @@ pub const Entity = struct {
 
     dead: ?Death = null,
 
+    pub fn radius(e: *const Entity) f32 {
+        return 8 * (0.55 + 0.45 * @min(1, e.age / maturity_age));
+    }
     pub fn mature(e: *const Entity) bool {
         return e.age > maturity_age;
     }
@@ -163,7 +178,6 @@ pub const max_population = 600;
 pub const brain_hz: f32 = 20;
 pub const history_len = 400;
 const sense_range: f32 = 160;
-const touch_range: f32 = 9;
 const adapt_tau: f32 = 1.0;
 const adapt_floor: f32 = 0.02;
 
@@ -189,6 +203,8 @@ pub const World = struct {
     history: [history_len][society_count]u16 = undefined,
     history_count: usize = 0,
     history_timer: f32 = 0,
+    contacts: [64]ContactEvent = undefined,
+    contact_count: usize = 0,
     threads: usize,
     /// Skip the social network and always forage (used by tests).
     forage_only: bool = false,
@@ -225,6 +241,7 @@ pub const World = struct {
         w.stats = @splat(.{});
         w.history_count = 0;
         w.history_timer = 0;
+        w.contact_count = 0;
         try w.populate();
     }
 
@@ -344,6 +361,8 @@ pub const World = struct {
         for (0..n) |i| {
             if (w.entities.items[i].dead == null) try w.act(i, dt);
         }
+        w.ageContacts(dt);
+        w.resolveCollisions();
 
         w.history_timer += dt;
         if (w.history_timer >= 2) {
@@ -433,7 +452,9 @@ pub const World = struct {
 
     fn thinkOne(w: *const World, e: *Entity) void {
         const s = e.society;
-        const smell = e.genome.motorGene(.smell);
+        // Starvation amplifies olfactory gain, as in real Drosophila DM1/DM4 ORNs.
+        const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
+        const smell = e.genome.motorGene(.smell) * (1 + 0.8 * hunger);
 
         // Two antennae, either side of the heading.
         const ant = [2]Vec2{
@@ -463,23 +484,36 @@ pub const World = struct {
         for (&attr, odour) |*o, c| o.* = @min(1, 0.08 * smell * c / (e.odour_adapt + adapt_floor));
         for (&alarm) |*o| o.* = @min(1, 0.3 * smell * o.* / (e.alarm_adapt + adapt_floor));
 
-        // Taste: whatever food is under the entity.
+        // Taste: food under the entity, preferring edible items over inedible ones.
         e.touching = null;
-        var best: f32 = touch_range;
+        const reach = e.radius() + 5;
+        var best_edible: f32 = reach;
+        var best_any: f32 = reach;
+        var any_touch: ?u32 = null;
         for (w.resources.items, 0..) |r, ri| {
             if (r.amount <= 0) continue;
             const d = r.pos.dist(e.pos);
-            if (d < best) {
-                best = d;
-                e.touching = @intCast(ri);
+            if (d >= reach) continue;
+            if (canEat(e, r.food) > 0) {
+                if (d < best_edible) {
+                    best_edible = d;
+                    e.touching = @intCast(ri);
+                }
+            } else if (d < best_any) {
+                best_any = d;
+                any_touch = @intCast(ri);
             }
         }
+        if (e.touching == null) e.touching = any_touch;
         var sugar: f32 = 0;
         var bitter: f32 = 0;
         if (e.touching) |ri| {
             const edible = canEat(e, w.resources.items[ri].food);
-            sugar = edible;
-            bitter = 1 - edible;
+            if (edible > 0) {
+                sugar = edible;
+            } else {
+                bitter = 1;
+            }
         }
 
         e.senses = .{ .attr_L = attr[0], .attr_R = attr[1], .alarm_L = alarm[0], .alarm_R = alarm[1], .sugar = sugar, .bitter = bitter };
@@ -528,6 +562,7 @@ pub const World = struct {
         e.since_meal += dt;
         e.repro_cooldown -= dt;
         e.escape_timer -= dt;
+        e.bump_cooldown = @max(0, e.bump_cooldown - dt);
 
         // Social decision.
         e.action_timer -= dt;
@@ -566,8 +601,11 @@ pub const World = struct {
         };
         if (target) |t| turn = steerTo(e.heading, e.pos, t, 5);
 
-        // Stay near home; low territoriality roams further.
-        const home = soc.territory.inset(-(60 + 400 * (1 - g.trait(.territoriality))));
+        // Stay near home when fed; low territoriality or hunger roams further to find scarce food.
+        const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
+        if (e.energy < 35 and e.action != .flee) e.action = .forage;
+        const roam = 60 + 400 * (1 - g.trait(.territoriality)) + 500 * hunger;
+        const home = soc.territory.inset(-roam);
         if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, soc.territory.center(), 3);
 
         e.heading += turn * dt;
@@ -582,12 +620,15 @@ pub const World = struct {
 
         e.feeding = false;
         if (e.touching) |ri| {
-            if (m.feed > g.motorGene(.feed_threshold) and w.resources.items[ri].pos.dist(e.pos) < touch_range + 4) {
-                const r = &w.resources.items[ri];
-                const value = canEat(e, r.food);
-                if (r.amount > 0 and value > 0) {
+            const r = &w.resources.items[ri];
+            const value = canEat(e, r.food);
+            const reach = e.radius() + 6;
+            if (r.amount > 0 and value > 0 and r.pos.dist(e.pos) < reach) {
+                // Slow on tasting edible food so MN9 has time to integrate before walking past.
+                speed *= 0.45;
+                if (m.feed > g.motorGene(.feed_threshold)) {
                     e.feeding = true;
-                    speed *= 0.1;
+                    speed *= 0.2;
                     const bite = @min(r.amount, 30 * m.feed * dt);
                     r.amount -= bite;
                     e.energy = @min(max_energy, e.energy + bite * value);
@@ -596,9 +637,12 @@ pub const World = struct {
                 }
             }
         }
-        e.pos.x += @cos(e.heading) * speed * dt;
-        e.pos.y += @sin(e.heading) * speed * dt;
-        const edge = bounds.inset(5);
+        e.pos.x += (@cos(e.heading) * speed + e.bump_vel.x) * dt;
+        e.pos.y += (@sin(e.heading) * speed + e.bump_vel.y) * dt;
+        const damp = @exp(-10 * dt);
+        e.bump_vel.x *= damp;
+        e.bump_vel.y *= damp;
+        const edge = bounds.inset(e.radius());
         if (!edge.contains(e.pos)) {
             e.pos.x = std.math.clamp(e.pos.x, edge.x, edge.x + edge.w);
             e.pos.y = std.math.clamp(e.pos.y, edge.y, edge.y + edge.h);
@@ -615,11 +659,11 @@ pub const World = struct {
         const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + 0.01 * @abs(speed)) * (1 + 0.5 * harsh);
         e.energy -= drain * dt;
 
-        // Combat.
+        // Combat (within physical reach).
         if (e.action == .fight) {
             if (e.enemy) |oi| {
                 const o = &w.entities.items[oi];
-                if (o.dead == null and o.pos.dist(e.pos) < 14) {
+                if (o.dead == null and o.pos.dist(e.pos) < e.radius() + o.radius() + 4) {
                     const dmg = (8 + 22 * g.trait(.aggression)) * dt;
                     o.energy -= dmg;
                     e.energy -= 3 * dt;
@@ -632,10 +676,10 @@ pub const World = struct {
             }
         }
 
-        // Any two ready adults that meet can breed; the mate action just makes them seek each other.
+        // Any two ready adults that touch/meet can breed; the mate action makes them seek each other.
         if (e.mate) |oi| {
             const o = &w.entities.items[oi];
-            if (o.pos.dist(e.pos) < 20 and e.readyToMate() and o.readyToMate() and w.entities.items.len < max_population) {
+            if (o.pos.dist(e.pos) < e.radius() + o.radius() + 6 and e.readyToMate() and o.readyToMate() and w.entities.items.len < max_population) {
                 try w.reproduce(i, oi);
             }
         }
@@ -686,7 +730,192 @@ pub const World = struct {
             p.children += 1;
         }
     }
+
+    fn ageContacts(w: *World, dt: f32) void {
+        var i: usize = 0;
+        while (i < w.contact_count) {
+            w.contacts[i].age += dt;
+            if (w.contacts[i].age >= contact_duration) {
+                w.contact_count -= 1;
+                w.contacts[i] = w.contacts[w.contact_count];
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    fn addContact(w: *World, pos: Vec2, kind: ContactKind, society: u8) void {
+        if (w.contact_count < w.contacts.len) {
+            w.contacts[w.contact_count] = .{ .pos = pos, .kind = kind, .society = society };
+            w.contact_count += 1;
+        } else {
+            // Replace the oldest active contact ripple.
+            var oldest: usize = 0;
+            for (1..w.contacts.len) |i| {
+                if (w.contacts[i].age > w.contacts[oldest].age) oldest = i;
+            }
+            w.contacts[oldest] = .{ .pos = pos, .kind = kind, .society = society };
+        }
+    }
+
+    /// Separate overlapping entities so bodies stay solid, and trigger tactile reactions on contact.
+    fn resolveCollisions(w: *World) void {
+        const items = w.entities.items;
+        const n = items.len;
+        if (n < 2) return;
+
+        for (0..3) |iter| {
+            for (0..n) |i| {
+                const a = &items[i];
+                if (a.dead != null) continue;
+                const ra = a.radius();
+                for (i + 1..n) |j| {
+                    const b = &items[j];
+                    if (b.dead != null) continue;
+                    const rb = b.radius();
+                    const min_dist = ra + rb;
+                    const dx = b.pos.x - a.pos.x;
+                    if (@abs(dx) >= min_dist) continue;
+                    const dy = b.pos.y - a.pos.y;
+                    if (@abs(dy) >= min_dist) continue;
+                    const d2 = dx * dx + dy * dy;
+                    if (d2 >= min_dist * min_dist) continue;
+
+                    var nx: f32 = undefined;
+                    var ny: f32 = undefined;
+                    var dist: f32 = undefined;
+                    if (d2 > 1e-6) {
+                        dist = @sqrt(d2);
+                        nx = dx / dist;
+                        ny = dy / dist;
+                    } else {
+                        const angle = @as(f32, @floatFromInt((a.id ^ b.id) % 360)) * (std.math.tau / 360.0);
+                        dist = 0;
+                        nx = @cos(angle);
+                        ny = @sin(angle);
+                    }
+
+                    const pen = min_dist - dist;
+                    const ma = ra * ra;
+                    const mb = rb * rb;
+                    const inv = 1.0 / (ma + mb);
+                    a.pos.x -= nx * pen * mb * inv;
+                    a.pos.y -= ny * pen * mb * inv;
+                    b.pos.x += nx * pen * ma * inv;
+                    b.pos.y += ny * pen * ma * inv;
+
+                    const edge_a = bounds.inset(ra);
+                    a.pos.x = std.math.clamp(a.pos.x, edge_a.x, edge_a.x + edge_a.w);
+                    a.pos.y = std.math.clamp(a.pos.y, edge_a.y, edge_a.y + edge_a.h);
+                    const edge_b = bounds.inset(rb);
+                    b.pos.x = std.math.clamp(b.pos.x, edge_b.x, edge_b.x + edge_b.w);
+                    b.pos.y = std.math.clamp(b.pos.y, edge_b.y, edge_b.y + edge_b.h);
+
+                    if (iter == 0 and (a.bump_cooldown <= 0 or b.bump_cooldown <= 0)) {
+                        w.onTouch(a, b, nx, ny);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Physical & behavioural reaction when two entities bump into each other.
+    fn onTouch(w: *World, a: *Entity, b: *Entity, nx: f32, ny: f32) void {
+        const mid = Vec2{ .x = (a.pos.x + b.pos.x) * 0.5, .y = (a.pos.y + b.pos.y) * 0.5 };
+        a.bump_cooldown = 0.45;
+        b.bump_cooldown = 0.45;
+
+        // Gentle elastic deflection so bodies slide around each other naturally.
+        const away_a = std.math.atan2(-ny, -nx);
+        const away_b = std.math.atan2(ny, nx);
+
+        if (a.society == b.society) {
+            // Kin slide smoothly past each other along the tangent instead of bouncing off their trail.
+            const tx = -ny;
+            const ty = nx;
+            const a_side: f32 = if (@cos(a.heading) * tx + @sin(a.heading) * ty >= 0) 1 else -1;
+            const b_side: f32 = if (@cos(b.heading) * tx + @sin(b.heading) * ty >= 0) 1 else -1;
+            a.bump_vel.x += tx * a_side * 8 - nx * 4;
+            a.bump_vel.y += ty * a_side * 8 - ny * 4;
+            b.bump_vel.x += tx * b_side * 8 + nx * 4;
+            b.bump_vel.y += ty * b_side * 8 + ny * 4;
+
+            if (a.readyToMate() and b.readyToMate()) {
+                w.addContact(mid, .courtship, a.society);
+                return;
+            }
+            // Trophallaxis: a well-fed, sociable kin shares a small bit of energy with a hungry one.
+            if (tryShareFood(w, a, b, mid) or tryShareFood(w, b, a, mid)) return;
+
+            // Antennation: a recently fed kin leaves a quick trail cue for a hungry kin.
+            if (a.since_meal < 8 and b.since_meal > 10) {
+                w.field.deposit(trailChannel(a.society), mid.x, mid.y, 0.8);
+                w.addContact(mid, .kin_greet, a.society);
+            } else if (b.since_meal < 8 and a.since_meal > 10) {
+                w.field.deposit(trailChannel(b.society), mid.x, mid.y, 0.8);
+                w.addContact(mid, .kin_greet, b.society);
+            }
+            return;
+        }
+
+        // Rival contact: immediate re-decision + alarm pheromone into both fly circuits.
+        a.action_timer = 0;
+        b.action_timer = 0;
+        w.field.deposit(alarmChannel(a.society), mid.x, mid.y, 1.5);
+        w.field.deposit(alarmChannel(b.society), mid.x, mid.y, 1.5);
+
+        const a_aggr = a.action == .fight or a.genome.trait(.aggression) > 0.65;
+        const b_aggr = b.action == .fight or b.genome.trait(.aggression) > 0.65;
+        const a_timid = a.action == .flee or a.genome.trait(.aggression) < 0.35;
+        const b_timid = b.action == .flee or b.genome.trait(.aggression) < 0.35;
+
+        const push_a: f32 = if (b_aggr) 55 else if (a_timid) 65 else 35;
+        const push_b: f32 = if (a_aggr) 55 else if (b_timid) 65 else 35;
+        a.bump_vel.x -= nx * push_a;
+        a.bump_vel.y -= ny * push_a;
+        b.bump_vel.x += nx * push_b;
+        b.bump_vel.y += ny * push_b;
+
+        if (a_aggr) {
+            a.heading = nudgeAngle(a.heading, away_b, 0.55);
+        } else if (a_timid) {
+            a.heading = nudgeAngle(a.heading, away_a, 0.85);
+            a.escape_timer = @max(a.escape_timer, 0.25);
+        } else {
+            a.heading = nudgeAngle(a.heading, away_a, 0.45);
+        }
+
+        if (b_aggr) {
+            b.heading = nudgeAngle(b.heading, away_a, 0.55);
+        } else if (b_timid) {
+            b.heading = nudgeAngle(b.heading, away_b, 0.85);
+            b.escape_timer = @max(b.escape_timer, 0.25);
+        } else {
+            b.heading = nudgeAngle(b.heading, away_b, 0.45);
+        }
+
+        const kind: ContactKind = if (a_aggr or b_aggr) .rival_clash else if (a_timid or b_timid) .startle else .rival_clash;
+        w.addContact(mid, kind, if (a_aggr) a.society else b.society);
+    }
+
+    fn tryShareFood(w: *World, donor: *Entity, receiver: *Entity, mid: Vec2) bool {
+        if (donor.energy > 105 and receiver.energy < 75 and donor.genome.trait(.sociability) > 0.45) {
+            const gift: f32 = 6;
+            donor.energy -= gift;
+            receiver.energy = @min(max_energy, receiver.energy + gift);
+            receiver.since_meal = @min(receiver.since_meal, 4);
+            w.field.deposit(trailChannel(donor.society), mid.x, mid.y, 1.0);
+            w.addContact(mid, .share_food, donor.society);
+            return true;
+        }
+        return false;
+    }
 };
+
+fn nudgeAngle(current: f32, target: f32, amount: f32) f32 {
+    const diff = @mod(target - current + std.math.pi, std.math.tau) - std.math.pi;
+    return current + diff * amount;
+}
 
 fn away(from: Vec2, threat: Vec2) Vec2 {
     return .{ .x = from.x * 2 - threat.x, .y = from.y * 2 - threat.y };
