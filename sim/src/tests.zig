@@ -198,4 +198,44 @@ test "world: hungry adaptable entity eats foreign food instead of passing over i
     try w.resources.append(gpa, .{ .pos = .{ .x = 6, .y = 0 }, .food = .meat, .amount = 40, .patch = null });
     for (0..60) |_| try w.step(1.0 / 60.0);
     try std.testing.expect(w.entities.items[0].food_eaten > 1.0);
+    try std.testing.expect(w.entities.items[0].skill(.foraging) > 0);
+}
+
+test "world: skills pass down to offspring and civilization alerts fire" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 123);
+    // Keep two skilled Circle adults right next to each other; Triangles & Squares empty -> extinct alert!
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    for (w.entities.items, 0..) |*e, idx| {
+        e.society = 1;
+        e.age = 50;
+        e.energy = 140;
+        e.repro_cooldown = 0;
+        e.pos = .{ .x = @as(f32, @floatFromInt(idx)) * 18, .y = 0 };
+        e.skills[@backingInt(sim.Skill.foraging)] = 0.8;
+        e.skills[@backingInt(sim.Skill.care)] = 0.8;
+    }
+
+    for (0..90) |_| try w.step(1.0 / 60.0);
+
+    // Offspring should have been born and inherited foraging & care skills from skilled parents.
+    try std.testing.expect(w.entities.items.len >= 3);
+    const child = w.entities.items[w.entities.items.len - 1];
+    try std.testing.expect(child.generation >= 2);
+    try std.testing.expect(child.skill(.foraging) > 0.25);
+    try std.testing.expect(child.skill(.care) > 0.25);
+    try std.testing.expect(w.gen_record_count >= 2);
+
+    // Status watcher should have flagged extinct/endangered societies and emitted events.
+    try std.testing.expectEqual(sim.SocietyStatus.extinct, w.stats[0].status);
+    try std.testing.expectEqual(sim.SocietyStatus.endangered, w.stats[1].status);
+    try std.testing.expect(w.event_count >= 2);
 }

@@ -104,6 +104,46 @@ pub const Patch = struct {
 
 pub const Death = enum { starved, old_age, killed };
 
+pub const Skill = enum(u8) {
+    foraging, // faster & higher-yield eating
+    navigation, // lower travel cost & sharper scent tracking
+    combat, // higher damage & better defense
+    care, // stronger food sharing & skill transfer to youth/offspring
+};
+pub const skill_count = @typeInfo(Skill).@"enum".field_names.len;
+
+pub const Role = enum(u8) {
+    juvenile,
+    novice,
+    forager,
+    scout,
+    guard,
+    caretaker,
+    elder,
+};
+
+pub const SocietyStatus = enum(u8) { thriving, stable, struggling, endangered, extinct };
+
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid };
+
+pub const WorldEvent = struct {
+    time: f32,
+    society: u8,
+    kind: EventKind,
+    value: u32,
+};
+pub const max_events = 24;
+
+pub const GenRecord = struct {
+    gen: u32 = 0,
+    births: u32 = 0,
+    skill_sum: [skill_count]f32 = @splat(0),
+    trait_eff_sum: f32 = 0,
+    trait_aggr_sum: f32 = 0,
+    trait_adapt_sum: f32 = 0,
+};
+pub const max_gen_records = 64;
+
 pub const ContactKind = enum { kin_greet, share_food, rival_clash, startle, courtship };
 
 pub const ContactEvent = struct {
@@ -123,6 +163,7 @@ pub const Entity = struct {
     age: f32 = 0,
     lifespan: f32,
     generation: u32 = 1,
+    lineage: u32 = 0,
     parents: [2]u32 = .{ 0, 0 },
     children: u32 = 0,
     hybrid: bool = false,
@@ -130,6 +171,7 @@ pub const Entity = struct {
     since_meal: f32 = 30,
     food_eaten: f32 = 0,
     kills: u32 = 0,
+    skills: [skill_count]f32 = @splat(0),
 
     genome: gen.Genome,
     brain: fly.State,
@@ -170,6 +212,36 @@ pub const Entity = struct {
         const threshold = 90 - 30 * e.genome.trait(.fertility);
         return e.dead == null and e.mature() and e.repro_cooldown <= 0 and e.energy > threshold;
     }
+    pub fn skill(e: *const Entity, s: Skill) f32 {
+        return e.skills[@backingInt(s)];
+    }
+    pub fn addSkill(e: *Entity, s: Skill, delta: f32) void {
+        if (delta <= 0) return;
+        const idx = @backingInt(s);
+        const cur = e.skills[idx];
+        e.skills[idx] = std.math.clamp(cur + delta * (1 - cur * 0.65), 0, 1);
+    }
+    pub fn role(e: *const Entity) Role {
+        if (!e.mature()) return .juvenile;
+        var best_i: usize = 0;
+        var best_v: f32 = e.skills[0];
+        var total: f32 = 0;
+        for (e.skills, 0..) |v, i| {
+            total += v;
+            if (v > best_v) {
+                best_v = v;
+                best_i = i;
+            }
+        }
+        if (e.age > e.lifespan * 0.65 and total >= 0.75) return .elder;
+        if (best_v < 0.18) return .novice;
+        return switch (@as(Skill, @fromBackingInt(@intCast(best_i)))) {
+            .foraging => .forager,
+            .navigation => .scout,
+            .combat => .guard,
+            .care => .caretaker,
+        };
+    }
 };
 
 pub const maturity_age: f32 = 30;
@@ -184,6 +256,13 @@ const adapt_floor: f32 = 0.02;
 pub const SocietyStats = struct {
     births: u32 = 0,
     deaths: [3]u32 = .{ 0, 0, 0 },
+    max_gen: u32 = 1,
+    peak_pop: u32 = 25,
+    status: SocietyStatus = .stable,
+    had_hybrid: bool = false,
+    boom_milestone: u32 = 50,
+    gen_milestone: u32 = 3,
+    extinct_time: ?f32 = null,
 };
 
 pub const World = struct {
@@ -203,6 +282,11 @@ pub const World = struct {
     history: [history_len][society_count]u16 = undefined,
     history_count: usize = 0,
     history_timer: f32 = 0,
+    status_timer: f32 = 0,
+    events: [max_events]WorldEvent = undefined,
+    event_count: usize = 0,
+    gen_records: [max_gen_records]GenRecord = @splat(.{}),
+    gen_record_count: usize = 0,
     contacts: [64]ContactEvent = undefined,
     contact_count: usize = 0,
     threads: usize,
@@ -241,6 +325,10 @@ pub const World = struct {
         w.stats = @splat(.{});
         w.history_count = 0;
         w.history_timer = 0;
+        w.status_timer = 0;
+        w.event_count = 0;
+        w.gen_records = @splat(.{});
+        w.gen_record_count = 0;
         w.contact_count = 0;
         try w.populate();
     }
@@ -270,6 +358,8 @@ pub const World = struct {
                 const g = try gen.Genome.random(w.gpa, w.rng(), w.circuit.types);
                 const e = try w.addEntity(@intCast(si), w.randomIn(s.territory.inset(40)), g);
                 e.age = w.rng().float(f32) * maturity_age * 1.5;
+                e.lineage = e.id;
+                w.recordGeneration(e);
             }
         }
     }
@@ -364,6 +454,12 @@ pub const World = struct {
         w.ageContacts(dt);
         w.resolveCollisions();
 
+        w.status_timer += dt;
+        if (w.status_timer >= 1.0) {
+            w.status_timer = 0;
+            w.updateSocietyStatuses();
+        }
+
         w.history_timer += dt;
         if (w.history_timer >= 2) {
             w.history_timer = 0;
@@ -454,7 +550,7 @@ pub const World = struct {
         const s = e.society;
         // Starvation amplifies olfactory gain, as in real Drosophila DM1/DM4 ORNs.
         const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
-        const smell = e.genome.motorGene(.smell) * (1 + 0.8 * hunger);
+        const smell = e.genome.motorGene(.smell) * (1 + 0.8 * hunger) * (1 + 0.25 * e.skill(.navigation));
 
         // Two antennae, either side of the heading.
         const ant = [2]Vec2{
@@ -629,16 +725,20 @@ pub const World = struct {
                 if (m.feed > g.motorGene(.feed_threshold)) {
                     e.feeding = true;
                     speed *= 0.2;
-                    const bite = @min(r.amount, 30 * m.feed * dt);
+                    const fskill = e.skill(.foraging);
+                    const bite = @min(r.amount, 30 * (1 + 0.35 * fskill) * m.feed * dt);
                     r.amount -= bite;
-                    e.energy = @min(max_energy, e.energy + bite * value);
-                    e.food_eaten += bite * value;
+                    const gained = bite * value * (1 + 0.25 * fskill);
+                    e.energy = @min(max_energy, e.energy + gained);
+                    e.food_eaten += gained;
                     e.since_meal = 0;
+                    e.addSkill(.foraging, bite * 0.004);
                 }
             }
         }
         e.pos.x += (@cos(e.heading) * speed + e.bump_vel.x) * dt;
         e.pos.y += (@sin(e.heading) * speed + e.bump_vel.y) * dt;
+        if (!e.feeding) e.addSkill(.navigation, @abs(speed) * dt * 0.00012);
         const damp = @exp(-10 * dt);
         e.bump_vel.x *= damp;
         e.bump_vel.y *= damp;
@@ -654,22 +754,27 @@ pub const World = struct {
             w.field.deposit(trailChannel(e.society), e.pos.x, e.pos.y, g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt);
         }
 
-        // Metabolism, harsher in hard environments.
+        // Metabolism, harsher in hard environments; navigation skill lowers travel cost.
         const harsh = if (soc.territory.contains(e.pos)) soc.harshness else 0.3;
-        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + 0.01 * @abs(speed)) * (1 + 0.5 * harsh);
+        const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
+        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost) * (1 + 0.5 * harsh);
         e.energy -= drain * dt;
 
-        // Combat (within physical reach).
+        // Combat (within physical reach); combat skill improves both offense and defense.
         if (e.action == .fight) {
             if (e.enemy) |oi| {
                 const o = &w.entities.items[oi];
                 if (o.dead == null and o.pos.dist(e.pos) < e.radius() + o.radius() + 4) {
-                    const dmg = (8 + 22 * g.trait(.aggression)) * dt;
+                    const atk = (8 + 22 * g.trait(.aggression)) * (1 + 0.4 * e.skill(.combat));
+                    const dmg = atk * (1 - 0.3 * o.skill(.combat)) * dt;
                     o.energy -= dmg;
                     e.energy -= 3 * dt;
+                    e.addSkill(.combat, dt * 0.05);
+                    o.addSkill(.combat, dt * 0.03);
                     w.field.deposit(alarmChannel(o.society), o.pos.x, o.pos.y, dmg * 0.6);
                     if (o.energy <= 0 and o.dead == null) {
                         e.kills += 1;
+                        e.addSkill(.combat, 0.08);
                         try w.kill(oi, .killed);
                     }
                 }
@@ -718,16 +823,97 @@ pub const World = struct {
         child.generation = @max(a.generation, b.generation) + 1;
         child.parents = .{ a.id, b.id };
         child.hybrid = a.society != b.society or a.hybrid or b.hybrid;
+        child.lineage = if (a.society != b.society) child.id else if (w.rng().boolean()) a.lineage else b.lineage;
         child.energy = 50;
         child.since_meal = 0;
+
+        // Pass down learned skills: parents' care skill & sociability raise transfer fidelity.
+        const avg_care = 0.5 * (a.skill(.care) + b.skill(.care));
+        const avg_soc = 0.5 * (a.genome.trait(.sociability) + b.genome.trait(.sociability));
+        const transfer = std.math.clamp(0.45 + 0.25 * avg_care + 0.1 * avg_soc, 0.35, 0.78);
+        for (&child.skills, a.skills, b.skills) |*cs, sa, sb| {
+            const jitter = 1 + 0.08 * w.rng().floatNorm(f32);
+            cs.* = std.math.clamp(0.5 * (sa + sb) * transfer * jitter, 0, 1);
+        }
+
         w.max_generation = @max(w.max_generation, child.generation);
-        w.stats[society].births += 1;
+        const st = &w.stats[society];
+        st.births += 1;
+        if (child.generation > st.max_gen) {
+            st.max_gen = child.generation;
+            if (st.max_gen >= st.gen_milestone) {
+                w.pushEvent(society, .milestone_gen, st.max_gen);
+                st.gen_milestone = if (st.gen_milestone < 5) 5 else st.gen_milestone + 5;
+            }
+        }
+        if (child.hybrid and !st.had_hybrid) {
+            st.had_hybrid = true;
+            w.pushEvent(society, .first_hybrid, child.generation);
+        }
+        w.recordGeneration(child);
 
         for ([_]usize{ ai, bi }) |pi| {
             const p = &w.entities.items[pi];
             p.energy -= 25;
             p.repro_cooldown = 10;
             p.children += 1;
+            p.addSkill(.care, 0.05);
+        }
+    }
+
+    fn recordGeneration(w: *World, e: *const Entity) void {
+        const idx = @min(e.generation -| 1, max_gen_records - 1);
+        const rec = &w.gen_records[idx];
+        rec.gen = e.generation;
+        rec.births += 1;
+        for (&rec.skill_sum, e.skills) |*sum, s| sum.* += s;
+        rec.trait_eff_sum += e.genome.trait(.efficiency);
+        rec.trait_aggr_sum += e.genome.trait(.aggression);
+        rec.trait_adapt_sum += e.genome.trait(.adaptability);
+        if (idx + 1 > w.gen_record_count) w.gen_record_count = idx + 1;
+    }
+
+    fn pushEvent(w: *World, society: u8, kind: EventKind, value: u32) void {
+        const ev = WorldEvent{ .time = w.time, .society = society, .kind = kind, .value = value };
+        if (w.event_count < max_events) {
+            w.events[w.event_count] = ev;
+            w.event_count += 1;
+        } else {
+            std.mem.copyForwards(WorldEvent, w.events[0 .. max_events - 1], w.events[1..]);
+            w.events[max_events - 1] = ev;
+        }
+    }
+
+    fn updateSocietyStatuses(w: *World) void {
+        for (0..society_count) |si| {
+            const pop = w.population(si);
+            const st = &w.stats[si];
+            const prev = st.status;
+            if (pop > st.peak_pop) st.peak_pop = pop;
+            const next: SocietyStatus = if (pop == 0)
+                .extinct
+            else if (pop <= 5)
+                .endangered
+            else if (pop <= 12)
+                .struggling
+            else if (pop >= 40)
+                .thriving
+            else
+                .stable;
+            st.status = next;
+
+            if (next == .extinct and prev != .extinct) {
+                st.extinct_time = w.time;
+                w.pushEvent(@intCast(si), .extinct, st.max_gen);
+            } else if (next == .endangered and prev != .endangered and prev != .extinct) {
+                w.pushEvent(@intCast(si), if (pop <= 3) .critical else .endangered, pop);
+            } else if ((prev == .endangered or prev == .struggling) and pop >= 15) {
+                w.pushEvent(@intCast(si), .recovered, pop);
+            }
+            if (pop >= st.boom_milestone) {
+                w.pushEvent(@intCast(si), .boom, pop);
+                st.boom_milestone += 50;
+            }
         }
     }
 
@@ -840,6 +1026,10 @@ pub const World = struct {
             b.bump_vel.x += tx * b_side * 8 + nx * 4;
             b.bump_vel.y += ty * b_side * 8 + ny * 4;
 
+            // Mentorship: experienced adults/elders pass a bit of their learned skills to less-skilled kin.
+            mentorKin(a, b);
+            mentorKin(b, a);
+
             if (a.readyToMate() and b.readyToMate()) {
                 w.addContact(mid, .courtship, a.society);
                 return;
@@ -850,9 +1040,11 @@ pub const World = struct {
             // Antennation: a recently fed kin leaves a quick trail cue for a hungry kin.
             if (a.since_meal < 8 and b.since_meal > 10) {
                 w.field.deposit(trailChannel(a.society), mid.x, mid.y, 0.8);
+                a.addSkill(.care, 0.015);
                 w.addContact(mid, .kin_greet, a.society);
             } else if (b.since_meal < 8 and a.since_meal > 10) {
                 w.field.deposit(trailChannel(b.society), mid.x, mid.y, 0.8);
+                b.addSkill(.care, 0.015);
                 w.addContact(mid, .kin_greet, b.society);
             }
             return;
@@ -861,6 +1053,8 @@ pub const World = struct {
         // Rival contact: immediate re-decision + alarm pheromone into both fly circuits.
         a.action_timer = 0;
         b.action_timer = 0;
+        a.addSkill(.combat, 0.02);
+        b.addSkill(.combat, 0.02);
         w.field.deposit(alarmChannel(a.society), mid.x, mid.y, 1.5);
         w.field.deposit(alarmChannel(b.society), mid.x, mid.y, 1.5);
 
@@ -900,15 +1094,30 @@ pub const World = struct {
 
     fn tryShareFood(w: *World, donor: *Entity, receiver: *Entity, mid: Vec2) bool {
         if (donor.energy > 105 and receiver.energy < 75 and donor.genome.trait(.sociability) > 0.45) {
-            const gift: f32 = 6;
+            const gift: f32 = 6 + 4 * donor.skill(.care);
             donor.energy -= gift;
             receiver.energy = @min(max_energy, receiver.energy + gift);
             receiver.since_meal = @min(receiver.since_meal, 4);
+            donor.addSkill(.care, 0.06);
             w.field.deposit(trailChannel(donor.society), mid.x, mid.y, 1.0);
             w.addContact(mid, .share_food, donor.society);
             return true;
         }
         return false;
+    }
+
+    fn mentorKin(mentor: *Entity, student: *Entity) void {
+        if (!mentor.mature()) return;
+        const rate = 0.06 * (0.6 + mentor.skill(.care) + if (mentor.role() == .elder) @as(f32, 0.5) else 0);
+        var taught = false;
+        for (0..skill_count) |si| {
+            const diff = mentor.skills[si] - student.skills[si];
+            if (diff > 0.08) {
+                student.addSkill(@fromBackingInt(@intCast(si)), diff * rate);
+                taught = true;
+            }
+        }
+        if (taught) mentor.addSkill(.care, 0.015);
     }
 };
 

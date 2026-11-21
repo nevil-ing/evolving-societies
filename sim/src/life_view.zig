@@ -31,6 +31,7 @@ const App = struct {
     follow: bool = false,
     show_brain: bool = true,
     show_key: bool = true,
+    show_gens: bool = false,
     field_tex: rl.Texture2D,
     field_px: []u8,
 };
@@ -207,6 +208,7 @@ fn input(app: *App) !void {
     if (rl.IsKeyPressed(rl.KEY_P)) cycleOverlay(app);
     if (rl.IsKeyPressed(rl.KEY_B)) app.show_brain = !app.show_brain;
     if (rl.IsKeyPressed(rl.KEY_L)) app.show_key = !app.show_key;
+    if (rl.IsKeyPressed(rl.KEY_G)) app.show_gens = !app.show_gens;
     if (rl.IsKeyPressed(rl.KEY_C)) app.follow = !app.follow and app.selected != null;
     if (rl.IsKeyPressed(rl.KEY_R)) try restart(app);
     if (rl.IsKeyPressed(rl.KEY_ESCAPE)) {
@@ -432,6 +434,9 @@ fn drawHud(app: *App) !void {
     text(24, 50, 14, rgb(200, 200, 215), "Population {d}   Max generation {d}", .{ total, w.max_generation });
     text(24, 70, 14, rgb(200, 200, 215), "Food: {s}   Overlay: {s}", .{ @tagName(w.scarcity), @tagName(app.overlay) });
 
+    // Top-center civilization alert / updates bar (click or press G for full log & generations).
+    drawAlertBar(app, sw);
+
     // Society panel + history chart.
     const px = sw - 312;
     panel(px, 12, 300, 300);
@@ -453,7 +458,8 @@ fn drawHud(app: *App) !void {
         const d = @max(n, 1);
         const st = w.stats[si];
         text(px + 12, y, 18, societyColor(s), "{s}", .{s.name});
-        text(px + 130, y + 3, 14, rgb(220, 220, 230), "pop {d:.0}  hybrids {d}", .{ n, hybrids });
+        drawStatusBadge(px + 102, y + 3, st.status);
+        text(px + 194, y + 3, 13, rgb(220, 220, 230), "pop {d:.0}  hyb {d}", .{ n, hybrids });
         text(px + 12, y + 22, 12, rgb(170, 175, 190), "births {d}  starved {d}  old {d}  killed {d}", .{ st.births, st.deaths[0], st.deaths[1], st.deaths[2] });
         text(px + 12, y + 38, 12, rgb(170, 175, 190), "avg gen {d:.1}  energy {d:.0}  aggr {d:.2}  trail {d:.2}", .{
             genr / d, energy / d, traits[@backingInt(gen.Trait.aggression)] / d, traits[@backingInt(gen.Trait.trail_output)] / d,
@@ -461,6 +467,8 @@ fn drawHud(app: *App) !void {
         y += 62;
     }
     drawHistory(w, px + 12, y + 4, 276, 100);
+
+    if (app.show_gens) drawGenerationsPanel(app, sw);
 
     // Legend / key below society panel.
     if (app.show_key) {
@@ -501,12 +509,171 @@ fn drawHud(app: *App) !void {
     }
     if (ui.button(rect(zx + 122, zy, 34, 30), " +", .{})) zoomBy(&app.camera, 1.25, null);
 
-    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
+    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G generations  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
     text(sw - 560, sh - 22, 11, rgb(100, 105, 120), "Fly circuit: FlyWire connectome v783 (Dorkenwald et al. 2024; Schlegel et al. 2024; Shiu et al. 2024)", .{});
 
     if (app.selected) |id| {
         if (w.findById(id)) |e| try drawInspector(app, e);
     }
+}
+
+fn drawStatusBadge(x: f32, y: f32, st: sim.SocietyStatus) void {
+    const label, const bg, const fg = switch (st) {
+        .thriving => .{ "THRIVING", rgb(26, 78, 48), rgb(110, 240, 150) },
+        .stable => .{ "STABLE", rgb(34, 44, 68), rgb(165, 190, 230) },
+        .struggling => .{ "LOW", rgb(82, 62, 22), rgb(250, 205, 95) },
+        .endangered => .{ "ENDANGERED", rgb(110, 32, 32), rgb(255, 130, 120) },
+        .extinct => .{ "EXTINCT", rgb(56, 24, 28), rgb(210, 110, 110) },
+    };
+    const w: f32 = if (st == .endangered) 84 else 68;
+    rl.DrawRectangleRounded(rect(x, y, w, 15), 0.4, 4, bg);
+    text(x + 6, y + 2, 10, fg, "{s}", .{label});
+}
+
+fn drawAlertBar(app: *App, sw: f32) void {
+    const w = &app.world;
+    const bw: f32 = 460;
+    const bx = (sw - bw) * 0.5;
+    if (bx < 322) return;
+    const r = rect(bx, 12, bw, 32);
+    panel(r.x, r.y, r.width, r.height);
+
+    // Highlight border if any society is endangered or extinct.
+    var urgent = false;
+    for (w.stats) |st| {
+        if (st.status == .endangered or st.status == .extinct) urgent = true;
+    }
+    if (urgent) rl.DrawRectangleRoundedLinesEx(r, 0.04, 6, 1.5, withAlpha(rgb(255, 110, 90), 170));
+
+    if (w.event_count > 0) {
+        const ev = w.events[w.event_count - 1];
+        const col = eventColor(ev);
+        rl.DrawCircleV(.{ .x = bx + 16, .y = 28 }, 4.5, col);
+        var buf: [128]u8 = undefined;
+        const msg = formatEvent(&buf, ev);
+        text(bx + 28, 20, 12, rgb(225, 230, 240), "{s}", .{msg});
+    } else {
+        rl.DrawCircleV(.{ .x = bx + 16, .y = 28 }, 4.5, rgb(110, 210, 140));
+        text(bx + 28, 20, 12, rgb(175, 180, 195), "All societies active — press G for updates & generations", .{});
+    }
+
+    const btn = rect(bx + bw - 92, 17, 84, 22);
+    const hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), btn);
+    rl.DrawRectangleRounded(btn, 0.35, 6, if (hover) rgb(60, 68, 94) else rgb(36, 42, 60));
+    text(btn.x + 8, btn.y + 4, 11, rgb(215, 220, 235), "{s}", .{if (app.show_gens) "Hide G" else "History G"});
+    if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) app.show_gens = !app.show_gens;
+}
+
+fn drawGenerationsPanel(app: *App, sw: f32) void {
+    const w = &app.world;
+    const pw: f32 = 460;
+    const px = (sw - pw) * 0.5;
+    if (px < 322) return;
+    const py: f32 = 52;
+    const ph: f32 = 382;
+    panel(px, py, pw, ph);
+
+    var y = py + 12;
+    text(px + 14, y, 15, rgb(235, 235, 245), "Civilization Updates, Roles & Generations", .{});
+    y += 24;
+
+    // 1. Live Civilization Updates
+    text(px + 14, y, 12, rgb(210, 215, 230), "Recent updates", .{});
+    y += 17;
+    if (w.event_count == 0) {
+        text(px + 20, y, 11, rgb(150, 155, 170), "No milestones or alerts yet.", .{});
+        y += 18;
+    } else {
+        const show = @min(w.event_count, 5);
+        for (0..show) |k| {
+            const ev = w.events[w.event_count - 1 - k];
+            rl.DrawCircleV(.{ .x = px + 20, .y = y + 6 }, 3.8, eventColor(ev));
+            var buf: [128]u8 = undefined;
+            const msg = formatEvent(&buf, ev);
+            text(px + 30, y, 11, rgb(200, 205, 220), "{s}", .{msg});
+            y += 16;
+        }
+    }
+
+    y += 8;
+    // 2. Emergent Society Roles
+    text(px + 14, y, 12, rgb(210, 215, 230), "Emergent roles (from learned skills)", .{});
+    y += 18;
+    for (sim.societies, 0..) |s, si| {
+        var counts: [7]u32 = @splat(0);
+        var avg_sk: [sim.skill_count]f32 = @splat(0);
+        var n: f32 = 0;
+        for (w.entities.items) |e| {
+            if (e.dead != null or e.society != si) continue;
+            n += 1;
+            counts[@backingInt(e.role())] += 1;
+            for (&avg_sk, e.skills) |*a, v| a.* += v;
+        }
+        const d = @max(n, 1);
+        text(px + 14, y, 12, societyColor(s), "{s}", .{s.name});
+        text(px + 92, y, 11, rgb(185, 190, 205), "foragers {d}  scouts {d}  guards {d}  care {d}  elders {d}", .{
+            counts[@backingInt(sim.Role.forager)],
+            counts[@backingInt(sim.Role.scout)],
+            counts[@backingInt(sim.Role.guard)],
+            counts[@backingInt(sim.Role.caretaker)],
+            counts[@backingInt(sim.Role.elder)],
+        });
+        y += 15;
+        text(px + 92, y, 10, rgb(140, 148, 165), "avg skills: forage {d:.0}%  nav {d:.0}%  combat {d:.0}%  care {d:.0}%", .{
+            avg_sk[0] / d * 100, avg_sk[1] / d * 100, avg_sk[2] / d * 100, avg_sk[3] / d * 100,
+        });
+        y += 17;
+    }
+
+    y += 6;
+    // 3. Generation Progression Table (inherited skills & traits at birth)
+    text(px + 14, y, 12, rgb(210, 215, 230), "Generations (inherited skills & traits at birth)", .{});
+    y += 18;
+    text(px + 14, y, 10, rgb(135, 142, 160), "Gen    Births    Forage    Nav     Combat    Care      Eff     Adapt", .{});
+    y += 15;
+    const total_recs = w.gen_record_count;
+    const start_rec = total_recs -| 6;
+    for (start_rec..total_recs) |idx| {
+        const rec = w.gen_records[idx];
+        if (rec.births == 0) continue;
+        const b: f32 = @floatFromInt(rec.births);
+        text(px + 14, y, 11, rgb(205, 210, 225), "G{d:<4}  {d:<7}  {d:>3.0}%      {d:>3.0}%    {d:>3.0}%      {d:>3.0}%      {d:.2}    {d:.2}", .{
+            rec.gen,
+            rec.births,
+            rec.skill_sum[0] / b * 100,
+            rec.skill_sum[1] / b * 100,
+            rec.skill_sum[2] / b * 100,
+            rec.skill_sum[3] / b * 100,
+            rec.trait_eff_sum / b,
+            rec.trait_adapt_sum / b,
+        });
+        y += 15;
+    }
+}
+
+fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
+    const mins: u32 = @intFromFloat(ev.time / 60);
+    const secs: u32 = @intFromFloat(@mod(ev.time, 60));
+    const name = sim.societies[ev.society].name;
+    return switch (ev.kind) {
+        .endangered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} endangered ({d} left)", .{ mins, secs, name, ev.value }),
+        .critical => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} near extinction ({d} left!)", .{ mins, secs, name, ev.value }),
+        .extinct => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} went extinct (reached Gen {d})", .{ mins, secs, name, ev.value }),
+        .recovered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} recovered ({d} strong)", .{ mins, secs, name, ev.value }),
+        .boom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} booming ({d} population)", .{ mins, secs, name, ev.value }),
+        .milestone_gen => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} reached Generation {d}", .{ mins, secs, name, ev.value }),
+        .first_hybrid => std.fmt.bufPrint(buf, "{d}:{d:0>2}  First {s} hybrid born (Gen {d})", .{ mins, secs, name, ev.value }),
+    } catch "";
+}
+
+fn eventColor(ev: sim.WorldEvent) rl.Color {
+    return switch (ev.kind) {
+        .endangered => rgb(250, 185, 70),
+        .critical, .extinct => rgb(255, 85, 75),
+        .recovered, .boom => rgb(100, 235, 145),
+        .milestone_gen => societyColor(sim.societies[ev.society]),
+        .first_hybrid => rgb(255, 220, 70),
+    };
 }
 
 fn drawKey(app: *App, x: f32, top: f32) void {
@@ -643,58 +810,67 @@ fn drawHistory(w: *const World, x: f32, y: f32, width: f32, height: f32) void {
 fn drawInspector(app: *App, e: *const sim.Entity) !void {
     const s = sim.societies[e.society];
     const x: f32 = 12;
-    var y: f32 = 116;
-    const h: f32 = if (app.show_brain) 640 else 470;
+    var y: f32 = 114;
+    const h: f32 = if (app.show_brain) 654 else 494;
     panel(x, y, 300, h);
-    y += 10;
-    text(x + 12, y, 18, societyColor(s), "{s} #{d}", .{ s.name, e.id });
-    if (e.hybrid) text(x + 200, y + 3, 14, rgb(255, 220, 60), "HYBRID", .{});
-    y += 24;
-    text(x + 12, y, 12, rgb(190, 195, 210), "gen {d}  age {d:.0}/{d:.0}s  children {d}  kills {d}", .{ e.generation, e.age, e.lifespan, e.children, e.kills });
-    y += 16;
-    text(x + 12, y, 12, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), if (e.feeding) " (feeding)" else "" });
-    y += 20;
-    bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
+    y += 8;
+    text(x + 12, y, 17, societyColor(s), "{s} #{d}", .{ s.name, e.id });
+    text(x + 136, y + 3, 12, rgb(170, 210, 240), "{s}", .{@tagName(e.role())});
+    if (e.hybrid) text(x + 218, y + 3, 12, rgb(255, 220, 60), "HYBRID", .{});
     y += 22;
-
-    text(x + 12, y, 13, rgb(235, 235, 245), "Senses -> fly circuit", .{});
+    text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lineage #{d}  age {d:.0}/{d:.0}s  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age, e.lifespan, e.children, e.kills });
+    y += 15;
+    text(x + 12, y, 11, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), if (e.feeding) " (feeding)" else "" });
+    y += 17;
+    bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
     y += 18;
+
+    text(x + 12, y, 12, rgb(235, 235, 245), "Senses -> fly circuit", .{});
+    y += 15;
     const sense = e.senses;
     bar2(x + 12, y, "odour L/R", sense.attr_L, sense.attr_R, rgb(120, 220, 160));
-    y += 16;
+    y += 14;
     bar2(x + 12, y, "alarm L/R", sense.alarm_L, sense.alarm_R, rgb(255, 140, 60));
-    y += 16;
+    y += 14;
     bar2(x + 12, y, "sugar/bitter", sense.sugar, sense.bitter, rgb(240, 220, 120));
-    y += 22;
+    y += 17;
 
-    text(x + 12, y, 13, rgb(235, 235, 245), "Fly motor output", .{});
-    y += 18;
+    text(x + 12, y, 12, rgb(235, 235, 245), "Fly motor output", .{});
+    y += 15;
     const m = e.motor;
     bar2(x + 12, y, "DNa01/02 L/R", m.turn_L * 5, m.turn_R * 5, rgb(140, 180, 255));
-    y += 16;
+    y += 14;
     bar(x + 12, y, "DNp09 walk", m.fwd, rgb(140, 180, 255));
-    y += 16;
+    y += 14;
     bar(x + 12, y, "MDN back", m.back, rgb(140, 180, 255));
-    y += 16;
+    y += 14;
     bar(x + 12, y, "giant fibre", m.escape, rgb(140, 180, 255));
-    y += 16;
+    y += 14;
     bar(x + 12, y, "MN9 feed", m.feed, rgb(140, 180, 255));
-    y += 22;
+    y += 17;
 
-    text(x + 12, y, 13, rgb(235, 235, 245), "Genes", .{});
-    y += 18;
+    text(x + 12, y, 12, rgb(235, 235, 245), "Learned skills (passed down)", .{});
+    y += 15;
+    for (e.skills, 0..) |v, i| {
+        bar(x + 12, y, @tagName(@as(sim.Skill, @fromBackingInt(@intCast(i)))), v, rgb(95, 220, 195));
+        y += 13;
+    }
+    y += 4;
+
+    text(x + 12, y, 12, rgb(235, 235, 245), "Genes", .{});
+    y += 15;
     for (e.genome.traits, 0..) |v, i| {
         bar(x + 12, y, @tagName(@as(gen.Trait, @fromBackingInt(@intCast(i)))), v, rgb(180, 160, 255));
-        y += 14;
+        y += 13;
     }
 
     if (app.show_brain) {
-        y += 8;
+        y += 6;
         const c = app.world.circuit;
-        text(x + 12, y, 13, rgb(235, 235, 245), "Fly neurons ({d} neurons, {d} synapse links)", .{ c.neurons, c.connections() });
-        y += 18;
-        const cols: usize = 46;
-        const cell: f32 = 6;
+        text(x + 12, y, 12, rgb(235, 235, 245), "Fly neurons ({d} neurons, {d} synapses)", .{ c.neurons, c.connections() });
+        y += 15;
+        const cols: usize = 55;
+        const cell: f32 = 5;
         for (e.brain.r, 0..) |r, i| {
             const cx = x + 12 + @as(f32, @floatFromInt(i % cols)) * cell;
             const cy = y + @as(f32, @floatFromInt(i / cols)) * cell;
