@@ -834,7 +834,7 @@ pub const World = struct {
                 const d_sig = e.pos.dist(e.heard_pos);
                 switch (hk) {
                     .danger_call => {
-                        if (d_sig < 260) {
+                        if (d_sig < 145 and e.energy >= 40) {
                             const guard_like = e.role() == .guard or g.trait(.aggression) > 0.58;
                             if (guard_like and e.energy > 55) {
                                 turn = steerTo(e.heading, e.pos, e.heard_pos, 4.0);
@@ -1008,9 +1008,9 @@ pub const World = struct {
             }
         }
 
-        // Other active society calls: danger warning, storm rally, courtship call.
+        // Other active society calls: danger warning (only when closely surrounded), storm rally, courtship call.
         if (!w.forage_only and e.call_cooldown <= 0) {
-            if (e.enemies_near >= 2) {
+            if (e.enemies_near >= 3 and e.enemy_dist < 48) {
                 if (e.enemy) |ei| w.emitSignal(i, .danger_call, w.entities.items[ei].pos);
             } else if (w.phase == .storm and e.huddled and (e.role() == .elder or e.role() == .caretaker or g.trait(.sociability) > 0.5)) {
                 w.emitSignal(i, .storm_rally, e.pos);
@@ -1232,6 +1232,27 @@ pub const World = struct {
             const ny = std.math.clamp(cur_c.y + (cy - cur_c.y) * 0.035 - nh * 0.5, safe.y, safe.y + safe.h - nh);
             cur.* = .{ .x = nx, .y = ny, .w = nw, .h = nh };
         }
+        // Keep living territories from collapsing completely on top of one another while still allowing border clashes.
+        for (0..society_count) |a| {
+            if (w.stats[a].status == .extinct) continue;
+            for (a + 1..society_count) |b| {
+                if (w.stats[b].status == .extinct) continue;
+                const ca = w.territories[a].center();
+                const cb = w.territories[b].center();
+                const dx = cb.x - ca.x;
+                const dy = cb.y - ca.y;
+                const d = @sqrt(dx * dx + dy * dy);
+                if (d < 360 and d > 1e-3) {
+                    const push = (360 - d) * 0.03;
+                    const ux = dx / d;
+                    const uy = dy / d;
+                    w.territories[a].x = std.math.clamp(w.territories[a].x - ux * push, safe.x, safe.x + safe.w - w.territories[a].w);
+                    w.territories[a].y = std.math.clamp(w.territories[a].y - uy * push, safe.y, safe.y + safe.h - w.territories[a].h);
+                    w.territories[b].x = std.math.clamp(w.territories[b].x + ux * push, safe.x, safe.x + safe.w - w.territories[b].w);
+                    w.territories[b].y = std.math.clamp(w.territories[b].y + uy * push, safe.y, safe.y + safe.h - w.territories[b].h);
+                }
+            }
+        }
     }
 
     fn updateSocietyStatuses(w: *World) void {
@@ -1328,8 +1349,11 @@ pub const World = struct {
         const sender = &w.entities.items[sender_idx];
         const soc = sender.society;
         const pos = sender.pos;
-        const radius = 180 + 140 * sender.genome.trait(.sociability) + 100 * sender.skill(.care);
-        sender.call_cooldown = 4.5;
+        const radius = if (kind == .danger_call)
+            120 + 60 * sender.genome.trait(.sociability)
+        else
+            180 + 140 * sender.genome.trait(.sociability) + 100 * sender.skill(.care);
+        sender.call_cooldown = if (kind == .danger_call) 10.0 else 4.5;
         sender.last_sent = kind;
         sender.energy = @max(1, sender.energy - 0.25);
         sender.addSkill(.care, 0.02);
@@ -1361,11 +1385,13 @@ pub const World = struct {
                     }
                 },
                 .danger_call => {
-                    o.heard_kind = .danger_call;
-                    o.heard_pos = target;
-                    o.heard_timer = 6;
-                    o.action_timer = 0;
-                    w.stats[soc].signals_acted += 1;
+                    if (o.energy >= 40) {
+                        o.heard_kind = .danger_call;
+                        o.heard_pos = target;
+                        o.heard_timer = 3.5;
+                        o.action_timer = 0;
+                        w.stats[soc].signals_acted += 1;
+                    }
                 },
                 .storm_rally => {
                     if (w.phase == .storm and !o.huddled and o.energy > 45) {
