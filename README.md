@@ -1,8 +1,8 @@
 # Evolving Societies
 
-An artificial life simulation where three societies (Triangles, Circles and Squares) compete for scarce food. Each creature thinks with a small piece of a real fruit fly brain.
+An artificial life simulation where three groups (Triangles, Circles and Squares) compete for scarce food. Each creature's sensing, steering and feeding run through wiring taken from the fruit fly connectome.
 
-Every entity runs its own copy of a smell → steer → feed circuit taken from the [FlyWire](https://flywire.ai) whole-brain connectome of *Drosophila melanogaster*: 1,597 real neurons and 31,714 real connections. On top of that sits a small evolved network for social choices: forage, fight, mate, socialize or flee. Food is scarce and keeps moving, so everyone has to find it, compete for it and leave chemical signals for their own kind.
+Every entity runs its own copy of a smell → steer → feed sub-circuit selected from the [FlyWire](https://flywire.ai) whole-brain connectome of *Drosophila melanogaster*: 1,597 neurons and 31,714 connections. The circuit is simulated as a simplified rate model; how senses feed into it and how its outputs move the body are modelling choices made here. On top of that sits a small evolved network for social choices: forage, fight, mate, socialize or flee. Food is scarce and keeps moving, so everyone has to find it, compete for it and leave chemical signals for their own kind.
 
 Written in Zig with raylib.
 
@@ -12,12 +12,12 @@ Written in Zig with raylib.
 
 The goal is behaviour that **emerges** instead of being scripted. Nothing in the code tells an entity to follow a trail, guard a food patch or avoid where others died. What exists:
 
-- **A real nervous system.** Odour and taste neurons feed into the fly's own wiring, and the steering, walking and feeding neurons drive the body. The connections and their signs (excitatory or inhibitory) come straight from the connectome.
+- **Connectome-derived wiring.** Odour and taste inputs drive a circuit whose connections and signs (excitatory or inhibitory) come from the connectome, and its steering, walking and feeding neurons drive the body. The sensory encoding, the rate dynamics and the movement rules are simplifications chosen for this project.
 - **Chemistry.** Food gives off scent. After eating, an entity lays a trail for its society. Fights and deaths release alarm pheromone. All of it spreads and fades over time.
 - **Scarcity.** Food grows in patches that run out and reappear somewhere else. You can push the world from abundant down to famine.
 - **Evolution.** Children inherit a mix of their parents' genes with mutations: body traits, social-network weights, and a gain for each of the 417 fly cell types. Evolution tunes the circuit without rewiring it.
 
-The question is what kinds of societies come out of that. Do trail-followers win? Do aggressive lineages take over neighbouring land? Do hybrids between societies do better? Run it and watch.
+What's assigned up front rather than emergent: the three groups, their diets, home territories and environments, and a rule that steers creatures back toward home. So far the simulation shows evolving populations. Whether anything worth calling social organisation emerges is the open question, and the next step is controlled experiments that separate inherited strategies from advantages built into the environment.
 
 ## How the fly circuit is wired in
 
@@ -25,7 +25,7 @@ The question is what kinds of societies come out of that. Do trail-followers win
 - **Acting.** The left/right balance of the DNa01/DNa02 descending neurons steers. DNp09 drives walking, MDN backs up, and the giant fibre triggers escape bursts. An entity only eats while the MN9 proboscis motor neuron fires.
 - **Dynamics.** Each copy is simulated as a rate model at 20 Hz, spread across CPU cores.
 
-In a controlled test (a food patch 150 units away, social behaviour switched off), entities steered by the fly circuit reached the food more than twice as often as entities that wandered.
+In a controlled test (a single food patch 150 units away, social behaviour switched off, 10 paired seeds with identical starting creatures), 286 of 750 entities steered by the fly circuit reached the food within 40 seconds, against 117 of 750 with steering disabled. Steering won in every seed. `zig build test -Dslow=true` reruns it.
 
 ## Building
 

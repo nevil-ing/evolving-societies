@@ -65,11 +65,9 @@ fn chemotaxis(steer: bool, seed: u64) !usize {
 
     var w = try World.init(gpa, &c, seed);
     w.forage_only = true;
+    // Remove every patch (not just empty it: an empty patch relocates and regrows).
     w.resources.clearRetainingCapacity();
-    for (w.patches.items) |*p| {
-        p.budget = 0;
-        p.live = 0;
-    }
+    w.patches.clearRetainingCapacity();
     const home = sim.societies[1].territory.center();
     for (0..8) |k| {
         const a = @as(f32, @floatFromInt(k)) * 0.8;
@@ -106,16 +104,21 @@ fn chemotaxis(steer: bool, seed: u64) !usize {
     return count;
 }
 
-test "slow: fly steering finds food better than wandering" {
+test "slow: fly steering reaches food at least twice as often as wandering" {
     if (!slow) return error.SkipZigTest;
     var with: usize = 0;
     var without: usize = 0;
-    for (1..6) |seed| {
-        with += try chemotaxis(true, seed);
-        without += try chemotaxis(false, seed);
+    std.debug.print("\n", .{});
+    for (1..11) |seed| {
+        const a = try chemotaxis(true, seed);
+        const b = try chemotaxis(false, seed);
+        std.debug.print("seed {d:>2}: steering {d:>3}  no steering {d:>3}\n", .{ seed, a, b });
+        try std.testing.expect(a > b);
+        with += a;
+        without += b;
     }
-    std.debug.print("\nreached food in 40s: fly steering {d}, no steering {d}\n", .{ with, without });
-    try std.testing.expect(with > without);
+    std.debug.print("total reached food in 40s: fly steering {d}, no steering {d}\n", .{ with, without });
+    try std.testing.expect(with >= 2 * without);
 }
 
 test "slow: populations across seeds" {
