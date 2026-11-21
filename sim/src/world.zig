@@ -219,6 +219,8 @@ pub const Entity = struct {
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
+    visible_food: ?Vec2 = null,
+    huddled: bool = false,
     enemy: ?u32 = null,
     enemy_dist: f32 = 0,
     enemies_near: u32 = 0,
@@ -260,7 +262,7 @@ pub const Entity = struct {
                 best_i = i;
             }
         }
-        if (e.age > e.lifespan * 0.65 and total >= 0.75) return .elder;
+        if (e.age > 300 and total >= 0.75) return .elder;
         if (best_v < 0.18) return .novice;
         return switch (@as(Skill, @fromBackingInt(@intCast(best_i)))) {
             .foraging => .forager,
@@ -429,7 +431,7 @@ pub const World = struct {
             .society = society,
             .pos = pos,
             .heading = w.rng().float(f32) * std.math.tau,
-            .lifespan = 220 + w.rng().float(f32) * 120,
+            .lifespan = 3600 + w.rng().float(f32) * 3600, // 1 to 2 simulated hours so individuals are easy to follow
             .genome = genome,
             .brain = brain,
         });
@@ -610,17 +612,26 @@ pub const World = struct {
         for (&attr, odour) |*o, c| o.* = @min(1, 0.08 * smell * c / (e.odour_adapt + adapt_floor));
         for (&alarm) |*o| o.* = @min(1, 0.3 * smell * o.* / (e.alarm_adapt + adapt_floor));
 
-        // Taste: food under the entity, preferring edible items over inedible ones.
+        // Taste + short-range food sight: prefer edible items under the entity,
+        // and spot nearby edible food visually so starving entities don't wander blind.
         e.touching = null;
+        e.visible_food = null;
         const reach = e.radius() + 5;
+        const sight = if (w.forage_only) reach else 95 + 45 * e.skill(.navigation);
         var best_edible: f32 = reach;
         var best_any: f32 = reach;
+        var best_sight: f32 = sight;
         var any_touch: ?u32 = null;
         for (w.resources.items, 0..) |r, ri| {
             if (r.amount <= 0) continue;
             const d = r.pos.dist(e.pos);
-            if (d >= reach) continue;
-            if (canEat(e, r.food) > 0) {
+            if (d >= sight) continue;
+            const edible = canEat(e, r.food);
+            if (edible > 0) {
+                if (d < best_sight) {
+                    best_sight = d;
+                    e.visible_food = r.pos;
+                }
                 if (d < best_edible) {
                     best_edible = d;
                     e.touching = @intCast(ri);
@@ -651,6 +662,7 @@ pub const World = struct {
         e.mate = null;
         e.enemies_near = 0;
         e.allies_near = 0;
+        var close_allies: u32 = 0;
         e.enemy_dist = sense_range;
         e.ally_dist = sense_range;
         var mate_dist: f32 = sense_range;
@@ -667,6 +679,7 @@ pub const World = struct {
                 }
             } else {
                 e.allies_near += 1;
+                if (d < 44) close_allies += 1;
                 if (d < e.ally_dist) {
                     e.ally_dist = d;
                     e.ally = @intCast(oi);
@@ -677,6 +690,7 @@ pub const World = struct {
                 e.mate = @intCast(oi);
             }
         }
+        e.huddled = close_allies >= 2;
     }
 
     fn act(w: *World, i: usize, dt: f32) !void {
@@ -731,11 +745,32 @@ pub const World = struct {
         const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
         if (e.energy < 35 and e.action != .flee) e.action = .forage;
 
-        // Adventure / exploration drive: low-territoriality, scout-skilled, or searching entities
-        // launch expeditions across the wider world when not locked onto a local scent.
+        // Adventure / exploration drive + visual food pursuit + storm huddling.
         e.explore_timer = @max(0, e.explore_timer - dt);
-        if (!w.forage_only and target == null and e.action == .forage) {
-            if (e.explore_target) |goal| {
+        var seeking_shelter = false;
+        if (!w.forage_only and w.phase == .storm and e.energy > 50 and !e.feeding and e.action != .fight and e.action != .flee) {
+            // During storms, non-starving beings huddle with nearby kin or pull back toward home cover.
+            if (!e.huddled) {
+                if (e.ally) |ai| {
+                    if (e.ally_dist > 22) {
+                        turn = steerTo(e.heading, e.pos, w.entities.items[ai].pos, 3.6);
+                        seeking_shelter = true;
+                    }
+                } else if (!soc.territory.contains(e.pos)) {
+                    turn = steerTo(e.heading, e.pos, soc.territory.center(), 3.2);
+                    seeking_shelter = true;
+                }
+            }
+        }
+
+        if (!w.forage_only and !seeking_shelter and target == null and e.action == .forage) {
+            if (e.visible_food) |fpos| {
+                // Visual lock onto nearby edible food when odour is faint or entity is hungry.
+                if (e.odour < 0.14 or e.energy < 70) {
+                    turn = steerTo(e.heading, e.pos, fpos, 4.2);
+                    e.explore_target = null;
+                }
+            } else if (e.explore_target) |goal| {
                 if (e.pos.dist(goal) < 40 or e.explore_timer <= 0) {
                     e.explore_target = null;
                     e.explore_timer = 3 + w.rng().float(f32) * 4;
@@ -747,6 +782,15 @@ pub const World = struct {
                     // take over as soon as it picks up a real food scent or trail.
                     turn = steerTo(e.heading, e.pos, goal, 2.5) + 0.5 * g.motorGene(.wander) * w.rng().floatNorm(f32);
                 }
+            } else if (e.energy < 55 and e.odour < 0.08) {
+                // Urgent search sweep: starving entity smelling nothing sets out immediately instead of idling.
+                var goal = w.randomIn(bounds.inset(90));
+                var tries: usize = 0;
+                while (goal.dist(e.pos) < 260 and tries < 5) : (tries += 1) {
+                    goal = w.randomIn(bounds.inset(90));
+                }
+                e.explore_target = goal;
+                e.explore_timer = 12;
             } else if (e.explore_timer <= 0 and e.odour < 0.16) {
                 const wanderlust = (1 - g.trait(.territoriality)) * 0.55 + e.skill(.navigation) * 0.35 +
                     (if (e.energy > 95) @as(f32, 0.25) else if (e.energy < 45) @as(f32, 0.35) else 0);
@@ -767,7 +811,7 @@ pub const World = struct {
             e.explore_target = null;
         }
 
-        if (e.explore_target == null) {
+        if (e.explore_target == null and !seeking_shelter and e.visible_food == null) {
             const roam = 160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger;
             const home = soc.territory.inset(-roam);
             if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, soc.territory.center(), 2.5);
@@ -782,7 +826,10 @@ pub const World = struct {
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
         if (e.action == .flee and e.enemy != null) speed = base * 1.2;
-        if (e.explore_target != null and e.odour < 0.25) speed = @max(speed, base * 0.95);
+        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter) {
+            speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
+        }
+        if (w.phase == .storm and e.huddled and !e.feeding and e.energy > 50) speed *= 0.45;
 
         e.feeding = false;
         if (e.touching) |ri| {
@@ -809,8 +856,13 @@ pub const World = struct {
                 }
             }
         }
-        const step_x = (@cos(e.heading) * speed + e.bump_vel.x) * dt;
-        const step_y = (@sin(e.heading) * speed + e.bump_vel.y) * dt;
+        // Physical crosswind during storms (huddled kin or home territory resist most of the wind).
+        const wind_scale: f32 = if (w.phase == .storm and !w.forage_only)
+            (if (e.huddled) @as(f32, 0.25) else if (soc.territory.contains(e.pos)) @as(f32, 0.5) else 1.0)
+        else
+            0;
+        const step_x = (@cos(e.heading) * speed + e.bump_vel.x + 14 * wind_scale) * dt;
+        const step_y = (@sin(e.heading) * speed + e.bump_vel.y + 4.5 * wind_scale) * dt;
         e.pos.x += step_x;
         e.pos.y += step_y;
         const moved = @sqrt(step_x * step_x + step_y * step_y);
@@ -834,9 +886,10 @@ pub const World = struct {
             w.field.deposit(trailChannel(e.society), e.pos.x, e.pos.y, g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt);
         }
 
-        // Metabolism, harsher in hard environments and during world storms; navigation skill lowers travel cost.
+        // Metabolism, harsher in hard environments and during world storms; huddling cuts storm harshness.
         // Larger cognitive brains also carry a small real metabolic upkeep so only useful growth survives selection.
-        const harsh = (if (soc.territory.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness();
+        const shelter_mult: f32 = if (w.phase == .storm and e.huddled) 0.55 else 1.0;
+        const harsh = (if (soc.territory.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * shelter_mult;
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
         const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0003 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
         const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + brain_cost) * (1 + 0.5 * harsh);
@@ -940,7 +993,7 @@ pub const World = struct {
         for ([_]usize{ ai, bi }) |pi| {
             const p = &w.entities.items[pi];
             p.energy -= 25;
-            p.repro_cooldown = 10;
+            p.repro_cooldown = 30;
             p.children += 1;
             p.addSkill(.care, 0.05);
             p.genome.cog.learn(0.8);

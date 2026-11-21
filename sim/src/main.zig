@@ -1,12 +1,17 @@
 const std = @import("std");
 const rl = @import("raylib");
+const fly = @import("flybrain.zig");
+const sim = @import("world.zig");
+const log = @import("logger.zig");
 const ui = @import("ui.zig");
 const life_view = @import("life_view.zig");
 
 const usage =
-    \\usage: evolving-societies [--seed N] [--shot FILE [SECONDS [ZOOM]]]
-    \\  --seed N      world seed (random if omitted)
-    \\  --shot FILE   simulate SECONDS (default 90), save a screenshot, exit
+    \\usage: evolving-societies [--seed N] [--out FILE] [--shot FILE [SECONDS [ZOOM]]] [--headless SECONDS]
+    \\  --seed N            world seed (random if omitted)
+    \\  --out FILE          CSV path for run telemetry (default data/world_states/run_<seed>.csv)
+    \\  --shot FILE         simulate SECONDS (default 90), save a screenshot, exit
+    \\  --headless SECONDS  run without opening a window and write CSV telemetry
     \\
 ;
 
@@ -15,12 +20,19 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var opts: ui.Options = .{};
+    var headless_secs: ?u32 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
         if (std.mem.eql(u8, a, "--seed") and i + 1 < args.len) {
             i += 1;
             opts.seed = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, a, "--out") and i + 1 < args.len) {
+            i += 1;
+            opts.out = args[i];
+        } else if (std.mem.eql(u8, a, "--headless") and i + 1 < args.len) {
+            i += 1;
+            headless_secs = try std.fmt.parseInt(u32, args[i], 10);
         } else if (std.mem.eql(u8, a, "--shot") and i + 1 < args.len) {
             i += 1;
             opts.shot = args[i];
@@ -36,6 +48,29 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print(usage, .{});
             return;
         }
+    }
+
+    if (headless_secs) |secs| {
+        const seed = opts.seed orelse 7919;
+        const circuit = try fly.Circuit.parse(gpa, @embedFile("flybrain"));
+        var world = try sim.World.init(gpa, &circuit, seed);
+        var logger = log.RunLogger.init(seed, opts.out);
+        defer logger.deinit();
+        logger.logNow(&world);
+        for (0..@as(usize, secs) * 60) |_| {
+            try world.step(1.0 / 60.0);
+            logger.maybeLog(&world);
+        }
+        logger.logNow(&world);
+        std.debug.print("headless run complete: {d}s, seed {d}, max gen {d}, log: {s}\n", .{
+            secs, seed, world.max_generation, logger.path(),
+        });
+        for (sim.societies, 0..) |s, si| {
+            std.debug.print("  {s:<10} pop={d:<3} births={d:<4} starved={d:<4} killed={d:<3} max_gen={d}\n", .{
+                s.name, world.population(si), world.stats[si].births, world.stats[si].deaths[0], world.stats[si].deaths[2], world.stats[si].max_gen,
+            });
+        }
+        return;
     }
 
     rl.SetConfigFlags(@intCast(rl.FLAG_WINDOW_RESIZABLE | rl.FLAG_MSAA_4X_HINT | rl.FLAG_VSYNC_HINT | rl.FLAG_WINDOW_HIGHDPI));

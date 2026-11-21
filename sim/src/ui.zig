@@ -10,6 +10,8 @@ pub const Options = struct {
     /// Simulated seconds to run before the screenshot.
     warmup: u32 = 90,
     zoom: ?f32 = null,
+    /// Optional CSV output path for run telemetry.
+    out: ?[:0]const u8 = null,
 };
 
 pub const speeds = [_]u32{ 1, 2, 4, 8, 16, 32, 64 };

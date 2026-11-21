@@ -286,3 +286,57 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     };
     try std.testing.expect(@abs(after - before) > 1e-4);
 }
+
+test "world: starving entity spots nearby food visually and eats instead of idling" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 314);
+    w.resources.clearRetainingCapacity();
+    w.patches.clearRetainingCapacity();
+    w.field.clear();
+    while (w.entities.items.len > 1) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    const e = &w.entities.items[0];
+    e.society = 2; // Squares (mineral)
+    e.age = 40;
+    e.energy = 28; // starving
+    e.pos = .{ .x = 0, .y = 0 };
+    e.heading = std.math.pi; // facing away from the food!
+    e.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    for (e.genome.fly_gain) |*g| g.* = 1.0;
+
+    // Place food 65 units away with ZERO pre-diffused scent.
+    try w.resources.append(gpa, .{ .pos = .{ .x = 65, .y = 0 }, .food = .mineral, .amount = 40, .patch = null });
+    for (0..60 * 5) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items[0].food_eaten > 1.0);
+}
+
+test "world: entities huddle during storms for shelter" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 555);
+    w.phase = .storm;
+    // Place 3 Circle allies near each other outside home territory during a storm.
+    while (w.entities.items.len > 3) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    for (w.entities.items, 0..) |*e, idx| {
+        e.society = 1;
+        e.age = 40;
+        e.energy = 100;
+        e.pos = .{ .x = @as(f32, @floatFromInt(idx)) * 22, .y = 0 };
+    }
+    for (0..20) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items[1].huddled);
+}

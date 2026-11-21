@@ -6,6 +6,7 @@ const rl = @import("raylib");
 const fly = @import("flybrain.zig");
 const gen = @import("genome.zig");
 const sim = @import("world.zig");
+const log = @import("logger.zig");
 const ui = @import("ui.zig");
 
 const World = sim.World;
@@ -23,6 +24,7 @@ const speeds = [_]u32{ 1, 2, 4, 8, 16 };
 
 const App = struct {
     world: World,
+    logger: log.RunLogger,
     camera: rl.Camera2D,
     paused: bool = false,
     speed: usize = 0,
@@ -42,12 +44,16 @@ pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
     const warmup = opts.warmup;
     const shot_zoom = opts.zoom orelse 1.6;
 
+    const seed = opts.seed orelse newSeed();
     var app = App{
-        .world = try World.init(gpa, &circuit, opts.seed orelse newSeed()),
+        .world = try World.init(gpa, &circuit, seed),
+        .logger = if (shot == null) log.RunLogger.init(seed, opts.out) else .{},
         .camera = .{ .offset = .{ .x = 0, .y = 0 }, .target = .{ .x = 0, .y = 0 }, .rotation = 0, .zoom = 1 },
         .field_tex = undefined,
         .field_px = undefined,
     };
+    defer app.logger.deinit();
+    app.logger.logNow(&app.world);
     fitCamera(&app.camera);
     const f = &app.world.field;
     app.field_px = try gpa.alloc(u8, f.cols * f.rows * 4);
@@ -76,7 +82,10 @@ pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
         };
         try input(&app);
         if (!app.paused) {
-            for (0..speeds[app.speed]) |_| try app.world.step(1.0 / 60.0);
+            for (0..speeds[app.speed]) |_| {
+                try app.world.step(1.0 / 60.0);
+                app.logger.maybeLog(&app.world);
+            }
         }
         if (app.selected) |id| {
             if (app.world.findById(id)) |e| {
@@ -244,7 +253,11 @@ fn cycleOverlay(app: *App) void {
 }
 
 fn restart(app: *App) !void {
-    try app.world.reset(newSeed());
+    const seed = newSeed();
+    try app.world.reset(seed);
+    app.logger.deinit();
+    app.logger = log.RunLogger.init(seed, null);
+    app.logger.logNow(&app.world);
     app.selected = null;
     app.follow = false;
 }
@@ -322,6 +335,9 @@ fn drawWorld(app: *App) void {
     const selected = if (app.selected) |id| w.findById(id) else null;
     for (w.entities.items) |*e| {
         if (e.dead != null) continue;
+        if (w.phase == .storm and e.huddled) {
+            rl.DrawCircleV(v2(e.pos), e.radius() + 6, withAlpha(rgb(155, 195, 255), 32));
+        }
         drawEntity(e, zoom, selected == e);
     }
 
@@ -865,9 +881,18 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     text(x + 136, y + 3, 12, rgb(170, 210, 240), "{s}", .{@tagName(e.role())});
     if (e.hybrid) text(x + 218, y + 3, 12, rgb(255, 220, 60), "HYBRID", .{});
     y += 22;
-    text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lineage #{d}  age {d:.0}/{d:.0}s  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age, e.lifespan, e.children, e.kills });
+    text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lin #{d}  age {d:.1}/{d:.0}m  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age / 60, e.lifespan / 60, e.children, e.kills });
     y += 15;
-    const suffix: []const u8 = if (e.feeding) " (feeding)" else if (e.explore_target != null) " (exploring)" else "";
+    const suffix: []const u8 = if (e.feeding)
+        " (feeding)"
+    else if (app.world.phase == .storm and e.huddled)
+        " (huddled)"
+    else if (e.visible_food != null)
+        " (food in sight)"
+    else if (e.explore_target != null)
+        " (exploring)"
+    else
+        "";
     text(x + 12, y, 11, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), suffix });
     y += 17;
     bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
