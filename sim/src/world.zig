@@ -463,10 +463,13 @@ pub const Entity = struct {
 
 pub const maturity_age: f32 = 30;
 pub const max_energy: f32 = 150;
-pub const max_population = 600;
 pub const brain_hz: f32 = 20;
 pub const history_len = 400;
 const sense_range: f32 = 160;
+const grid_cell: f32 = 80;
+const grid_cols: usize = 25; // bounds.w (2000) / 80
+const grid_rows: usize = 20; // bounds.h (1600) / 80
+const grid_cells: usize = grid_cols * grid_rows;
 const adapt_tau: f32 = 1.0;
 const adapt_floor: f32 = 0.02;
 
@@ -527,6 +530,8 @@ pub const World = struct {
     contact_count: usize = 0,
     signals: [48]Signal = undefined,
     signal_count: usize = 0,
+    grid_head: [grid_cells]i32 = @splat(-1),
+    grid_next: std.ArrayList(i32) = .empty,
     threads: usize,
     /// Skip the social network and always forage (used by tests).
     forage_only: bool = false,
@@ -821,12 +826,11 @@ pub const World = struct {
         w.scarcity = .none;
     }
 
-    /// Spawn a batch of fresh entities into a society's living territory (capped at max_population).
+    /// Spawn a batch of fresh entities into a society's living territory.
     pub fn spawnRandomBatch(w: *World, society: u8, count: usize) !usize {
         var spawned: usize = 0;
         const area = w.territories[society].inset(28);
         for (0..count) |_| {
-            if (w.entities.items.len >= max_population) break;
             const g = try gen.Genome.random(w.gpa, w.rng(), w.circuit.types);
             const e = try w.addEntity(society, w.randomIn(area), g);
             e.age = maturity_age + w.rng().float(f32) * 20;
@@ -908,6 +912,7 @@ pub const World = struct {
             w.removeDepletedMaterials();
             w.removeDeadPrey();
             w.removeCollapsedStructures();
+            try w.rebuildGrid();
             w.think();
         }
 
@@ -917,7 +922,7 @@ pub const World = struct {
         }
         w.ageContacts(dt);
         w.ageSignals(dt);
-        w.resolveCollisions();
+        try w.resolveCollisions();
 
         w.status_timer += dt;
         if (w.status_timer >= 1.0) {
@@ -931,7 +936,7 @@ pub const World = struct {
         if (w.history_timer >= 2) {
             w.history_timer = 0;
             var row: [society_count]u16 = undefined;
-            for (&row, 0..) |*r, s| r.* = @intCast(w.population(s));
+            for (&row, 0..) |*r, s| r.* = @intCast(@min(w.population(s), std.math.maxInt(u16)));
             if (w.history_count < history_len) {
                 w.history[w.history_count] = row;
                 w.history_count += 1;
@@ -1079,6 +1084,28 @@ pub const World = struct {
         }
     }
 
+    fn cellCoords(pos: Vec2) [2]usize {
+        const cx: usize = @intFromFloat(std.math.clamp((pos.x - bounds.x) / grid_cell, 0, @as(f32, @floatFromInt(grid_cols - 1))));
+        const cy: usize = @intFromFloat(std.math.clamp((pos.y - bounds.y) / grid_cell, 0, @as(f32, @floatFromInt(grid_rows - 1))));
+        return .{ cx, cy };
+    }
+
+    fn rebuildGrid(w: *World) !void {
+        @memset(&w.grid_head, -1);
+        const n = w.entities.items.len;
+        try w.grid_next.resize(w.gpa, n);
+        for (w.entities.items, 0..) |e, idx| {
+            if (e.dead != null) {
+                w.grid_next.items[idx] = -1;
+                continue;
+            }
+            const cc = cellCoords(e.pos);
+            const cell = cc[1] * grid_cols + cc[0];
+            w.grid_next.items[idx] = w.grid_head[cell];
+            w.grid_head[cell] = @intCast(idx);
+        }
+    }
+
     /// Sense, scan neighbours and run the fly circuit for every entity, in parallel.
     fn think(w: *World) void {
         const n = w.entities.items.len;
@@ -1195,31 +1222,44 @@ pub const World = struct {
         var weak_kin: ?u32 = null;
         var weak_kin_dist: f32 = sense_range;
         const ready = e.readyToMate();
-        for (w.entities.items, 0..) |*o, oi| {
-            if (o.id == e.id or o.dead != null) continue;
-            const d = o.pos.dist(e.pos);
-            if (d >= sense_range) continue;
-            if (o.society != e.society) {
-                e.enemies_near += 1;
-                if (d < e.enemy_dist) {
-                    e.enemy_dist = d;
-                    e.enemy = @intCast(oi);
+        const cc = cellCoords(e.pos);
+        const x0: usize = cc[0] -| 2;
+        const x1: usize = @min(grid_cols - 1, cc[0] + 2);
+        const y0: usize = cc[1] -| 2;
+        const y1: usize = @min(grid_rows - 1, cc[1] + 2);
+        for (y0..y1 + 1) |gy| {
+            for (x0..x1 + 1) |gx| {
+                var cur = w.grid_head[gy * grid_cols + gx];
+                while (cur >= 0) {
+                    const oi: usize = @intCast(cur);
+                    cur = w.grid_next.items[oi];
+                    const o = &w.entities.items[oi];
+                    if (o.id == e.id or o.dead != null) continue;
+                    const d = o.pos.dist(e.pos);
+                    if (d >= sense_range) continue;
+                    if (o.society != e.society) {
+                        e.enemies_near += 1;
+                        if (d < e.enemy_dist) {
+                            e.enemy_dist = d;
+                            e.enemy = @intCast(oi);
+                        }
+                    } else {
+                        e.allies_near += 1;
+                        if (d < 44) close_allies += 1;
+                        if (d < e.ally_dist) {
+                            e.ally_dist = d;
+                            e.ally = @intCast(oi);
+                        }
+                        if (o.energy <= e.energy + 12 and o.energy < 70 and d < weak_kin_dist) {
+                            weak_kin_dist = d;
+                            weak_kin = @intCast(oi);
+                        }
+                    }
+                    if (ready and o.readyToMate() and d < mate_dist) {
+                        mate_dist = d;
+                        e.mate = @intCast(oi);
+                    }
                 }
-            } else {
-                e.allies_near += 1;
-                if (d < 44) close_allies += 1;
-                if (d < e.ally_dist) {
-                    e.ally_dist = d;
-                    e.ally = @intCast(oi);
-                }
-                if (o.energy <= e.energy + 12 and o.energy < 70 and d < weak_kin_dist) {
-                    weak_kin_dist = d;
-                    weak_kin = @intCast(oi);
-                }
-            }
-            if (ready and o.readyToMate() and d < mate_dist) {
-                mate_dist = d;
-                e.mate = @intCast(oi);
             }
         }
         e.huddled = close_allies >= 2;
@@ -1921,7 +1961,7 @@ pub const World = struct {
         // Any two ready adults that touch/meet can breed; the mate action makes them seek each other.
         if (e.mate) |oi| {
             const o = &w.entities.items[oi];
-            if (o.pos.dist(e.pos) < e.radius() + o.radius() + 6 and e.readyToMate() and o.readyToMate() and w.entities.items.len < max_population) {
+            if (o.pos.dist(e.pos) < e.radius() + o.radius() + 6 and e.readyToMate() and o.readyToMate()) {
                 try w.reproduce(i, oi);
             }
         }
@@ -2341,60 +2381,75 @@ pub const World = struct {
     }
 
     /// Separate overlapping entities so bodies stay solid, and trigger tactile reactions on contact.
-    fn resolveCollisions(w: *World) void {
+    /// Uses the spatial hash grid so uncapped populations stay O(N).
+    fn resolveCollisions(w: *World) !void {
         const items = w.entities.items;
         const n = items.len;
         if (n < 2) return;
 
         for (0..3) |iter| {
+            try w.rebuildGrid();
             for (0..n) |i| {
                 const a = &items[i];
                 if (a.dead != null) continue;
                 const ra = a.radius();
-                for (i + 1..n) |j| {
-                    const b = &items[j];
-                    if (b.dead != null) continue;
-                    const rb = b.radius();
-                    const min_dist = ra + rb;
-                    const dx = b.pos.x - a.pos.x;
-                    if (@abs(dx) >= min_dist) continue;
-                    const dy = b.pos.y - a.pos.y;
-                    if (@abs(dy) >= min_dist) continue;
-                    const d2 = dx * dx + dy * dy;
-                    if (d2 >= min_dist * min_dist) continue;
+                const cc = cellCoords(a.pos);
+                const x0: usize = cc[0] -| 1;
+                const x1: usize = @min(grid_cols - 1, cc[0] + 1);
+                const y0: usize = cc[1] -| 1;
+                const y1: usize = @min(grid_rows - 1, cc[1] + 1);
+                for (y0..y1 + 1) |gy| {
+                    for (x0..x1 + 1) |gx| {
+                        var cur = w.grid_head[gy * grid_cols + gx];
+                        while (cur >= 0) {
+                            const j: usize = @intCast(cur);
+                            cur = w.grid_next.items[j];
+                            if (j <= i) continue;
+                            const b = &items[j];
+                            if (b.dead != null) continue;
+                            const rb = b.radius();
+                            const min_dist = ra + rb;
+                            const dx = b.pos.x - a.pos.x;
+                            if (@abs(dx) >= min_dist) continue;
+                            const dy = b.pos.y - a.pos.y;
+                            if (@abs(dy) >= min_dist) continue;
+                            const d2 = dx * dx + dy * dy;
+                            if (d2 >= min_dist * min_dist) continue;
 
-                    var nx: f32 = undefined;
-                    var ny: f32 = undefined;
-                    var dist: f32 = undefined;
-                    if (d2 > 1e-6) {
-                        dist = @sqrt(d2);
-                        nx = dx / dist;
-                        ny = dy / dist;
-                    } else {
-                        const angle = @as(f32, @floatFromInt((a.id ^ b.id) % 360)) * (std.math.tau / 360.0);
-                        dist = 0;
-                        nx = @cos(angle);
-                        ny = @sin(angle);
-                    }
+                            var nx: f32 = undefined;
+                            var ny: f32 = undefined;
+                            var dist: f32 = undefined;
+                            if (d2 > 1e-6) {
+                                dist = @sqrt(d2);
+                                nx = dx / dist;
+                                ny = dy / dist;
+                            } else {
+                                const angle = @as(f32, @floatFromInt((a.id ^ b.id) % 360)) * (std.math.tau / 360.0);
+                                dist = 0;
+                                nx = @cos(angle);
+                                ny = @sin(angle);
+                            }
 
-                    const pen = min_dist - dist;
-                    const ma = ra * ra;
-                    const mb = rb * rb;
-                    const inv = 1.0 / (ma + mb);
-                    a.pos.x -= nx * pen * mb * inv;
-                    a.pos.y -= ny * pen * mb * inv;
-                    b.pos.x += nx * pen * ma * inv;
-                    b.pos.y += ny * pen * ma * inv;
+                            const pen = min_dist - dist;
+                            const ma = ra * ra;
+                            const mb = rb * rb;
+                            const inv = 1.0 / (ma + mb);
+                            a.pos.x -= nx * pen * mb * inv;
+                            a.pos.y -= ny * pen * mb * inv;
+                            b.pos.x += nx * pen * ma * inv;
+                            b.pos.y += ny * pen * ma * inv;
 
-                    const edge_a = bounds.inset(ra);
-                    a.pos.x = std.math.clamp(a.pos.x, edge_a.x, edge_a.x + edge_a.w);
-                    a.pos.y = std.math.clamp(a.pos.y, edge_a.y, edge_a.y + edge_a.h);
-                    const edge_b = bounds.inset(rb);
-                    b.pos.x = std.math.clamp(b.pos.x, edge_b.x, edge_b.x + edge_b.w);
-                    b.pos.y = std.math.clamp(b.pos.y, edge_b.y, edge_b.y + edge_b.h);
+                            const edge_a = bounds.inset(ra);
+                            a.pos.x = std.math.clamp(a.pos.x, edge_a.x, edge_a.x + edge_a.w);
+                            a.pos.y = std.math.clamp(a.pos.y, edge_a.y, edge_a.y + edge_a.h);
+                            const edge_b = bounds.inset(rb);
+                            b.pos.x = std.math.clamp(b.pos.x, edge_b.x, edge_b.x + edge_b.w);
+                            b.pos.y = std.math.clamp(b.pos.y, edge_b.y, edge_b.y + edge_b.h);
 
-                    if (iter == 0 and (a.bump_cooldown <= 0 or b.bump_cooldown <= 0)) {
-                        w.onTouch(a, b, nx, ny);
+                            if (iter == 0 and (a.bump_cooldown <= 0 or b.bump_cooldown <= 0)) {
+                                w.onTouch(a, b, nx, ny);
+                            }
+                        }
                     }
                 }
             }

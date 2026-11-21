@@ -658,3 +658,18 @@ test "world: episodic memory guides navigation, updates stale beliefs, and share
     try std.testing.expect(reached);
     try std.testing.expect(cleared);
 }
+
+test "world: uncapped population scales cleanly past 600 via spatial grid" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 700);
+    _ = try w.spawnRandomBatch(0, 220);
+    _ = try w.spawnRandomBatch(1, 220);
+    _ = try w.spawnRandomBatch(2, 220);
+    try std.testing.expect(w.entities.items.len > 700);
+    for (0..10) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items.len > 700);
+}

@@ -1032,7 +1032,6 @@ fn drawLabPanel(app: *App, sw: f32) !void {
         const rng = app.world.prng.random();
         var last_id: ?u32 = null;
         for (0..qty) |k| {
-            if (app.world.entities.items.len >= sim.max_population) break;
             const spread: f32 = if (qty == 1) 0 else 18 + @sqrt(@as(f32, @floatFromInt(k + 1))) * 14;
             const ang = rng.float(f32) * std.math.tau;
             const pos = sim.Vec2{
@@ -1222,7 +1221,7 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     // 3. Population & Batch Release Spawner
     var total_pop: u32 = 0;
     for (0..sim.society_count) |si| total_pop += w.population(si);
-    text(px + 14, y, 12, rgb(225, 228, 240), "Population release  ({d} / {d} cap)", .{ total_pop, sim.max_population });
+    text(px + 14, y, 12, rgb(225, 228, 240), "Population release  ({d} alive, uncapped)", .{total_pop});
     y += 18;
     text(px + 14, y + 3, 11, rgb(180, 185, 200), "Release amount:", .{});
     var bx = px + 124;
