@@ -481,6 +481,26 @@ fn drawWorld(app: *App) void {
         }
     }
 
+    // Apex Predators (crimson-violet frontier stalkers that hunt stragglers & force collective defense).
+    for (w.predators.items) |pd| {
+        if (pd.hp <= 0) continue;
+        const c = v2(pd.pos);
+        const deg = pd.heading * 180 / std.math.pi;
+        rl.DrawCircleV(c, 19, withAlpha(rgb(220, 35, 75), 26));
+        rl.DrawPoly(c, 4, 15.5, deg, rgb(125, 22, 58));
+        rl.DrawPoly(c, 3, 14.0, deg, rgb(205, 38, 72));
+        rl.DrawPolyLinesEx(c, 4, 15.5, deg, 1.8 / @max(zoom, 0.5), rgb(255, 110, 130));
+        // Glowing red fangs/eyes facing forward
+        const eye_l = rl.Vector2{ .x = c.x + 8 * @cos(pd.heading - 0.35), .y = c.y + 8 * @sin(pd.heading - 0.35) };
+        const eye_r = rl.Vector2{ .x = c.x + 8 * @cos(pd.heading + 0.35), .y = c.y + 8 * @sin(pd.heading + 0.35) };
+        rl.DrawCircleV(eye_l, 2.0, rgb(255, 225, 100));
+        rl.DrawCircleV(eye_r, 2.0, rgb(255, 225, 100));
+        if (pd.hp < pd.max_hp) {
+            rl.DrawRectangleRec(rect(c.x - 14, c.y - 21, 28, 3.5), rgb(35, 24, 32));
+            rl.DrawRectangleRec(rect(c.x - 14, c.y - 21, 28 * std.math.clamp(pd.hp / pd.max_hp, 0, 1), 3.5), rgb(255, 65, 95));
+        }
+    }
+
     const selected = if (app.selected) |id| w.findById(id) else null;
     for (w.entities.items) |*e| {
         if (e.dead != null) continue;
@@ -1143,15 +1163,16 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     var y = py + 12;
     text(px + 14, y, 15, rgb(235, 235, 245), "Experiment Controls - Food, Weather, Hunting & Spawning (E)", .{});
     y += 22;
-    text(px + 14, y, 11, rgb(175, 185, 200), "Food: {d}   Corpses: {d}   Cannibal: T {d}/C {d}/S {d}   Built: {d}   Tools: {d}   Prey: {d}", .{
+    text(px + 14, y, 11, rgb(175, 185, 200), "Food: {d}   Corpses: {d}   Built: {d}   Tools: {d}   Prey: {d}   Pred: {d}   Cann: {d}/{d}/{d}", .{
         w.foodCount(),
         w.corpseCount(),
-        w.stats[0].cannibal_kills,
-        w.stats[1].cannibal_kills,
-        w.stats[2].cannibal_kills,
         w.structureCount(),
         w.toolCount(),
         w.preyCount(),
+        w.predatorCount(),
+        w.stats[0].cannibal_kills,
+        w.stats[1].cannibal_kills,
+        w.stats[2].cannibal_kills,
     });
     y += 24;
 
@@ -1258,13 +1279,16 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     }
     y += 34;
 
-    // 4. Knowledge, Tools & Wild Prey
-    text(px + 14, y, 12, rgb(225, 228, 240), "Tools, building & wild prey", .{});
+    // 4. Knowledge, Tools, Wild Prey & Apex Predators
+    text(px + 14, y, 12, rgb(225, 228, 240), "Tools, wildlife & predators", .{});
     y += 18;
-    if (smallBtn(rect(px + 14, y, 148, 24), "Spawn Wild Prey (+3)", rgb(104, 72, 34))) {
+    if (smallBtn(rect(px + 14, y, 134, 24), "Spawn Prey (+3)", rgb(104, 72, 34))) {
         try w.spawnPrey(3);
     }
-    if (smallBtn(rect(px + 168, y, 180, 24), "Inspire Pioneers (+Build/Tool)", rgb(44, 76, 86))) {
+    if (smallBtn(rect(px + 154, y, 152, 24), "Spawn Predator (+1)", rgb(135, 32, 62))) {
+        try w.spawnPredators(1);
+    }
+    if (smallBtn(rect(px + 312, y, 196, 24), "Inspire Pioneers (+Build/Tool)", rgb(44, 76, 86))) {
         w.inspirePioneers();
     }
     y += 30;
@@ -1398,6 +1422,8 @@ fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
         .cannibalism => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Cannibalism emerged in {s} ({d} kills)!", .{ mins, secs, name, ev.value }),
         .tool_discovered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} discovered tool-making!", .{ mins, secs, name }),
         .building_discovered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} built their first {s}!", .{ mins, secs, name, if (ev.value == 0) "shelter" else "food cache" }),
+        .predator_slain => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} slew an Apex Predator ({d} total)!", .{ mins, secs, name, ev.value }),
+        .cache_raided => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} raided a {s} food cache!", .{ mins, secs, sim.societies[@min(ev.value, sim.society_count - 1)].name, name }),
         .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom - abundant food growth", .{ mins, secs }),
         .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
@@ -1405,10 +1431,10 @@ fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
 
 fn eventColor(ev: sim.WorldEvent) rl.Color {
     return switch (ev.kind) {
-        .endangered, .territory_clash => rgb(250, 185, 70),
+        .endangered, .territory_clash, .cache_raided => rgb(250, 185, 70),
         .critical, .extinct => rgb(255, 85, 75),
         .cannibalism => rgb(255, 75, 125),
-        .tool_discovered, .building_discovered => rgb(110, 230, 235),
+        .tool_discovered, .building_discovered, .predator_slain => rgb(110, 230, 235),
         .recovered, .boom, .world_bloom => rgb(100, 235, 145),
         .milestone_gen => societyColor(sim.societies[ev.society]),
         .first_hybrid, .hybrid_majority => rgb(255, 220, 70),
@@ -1418,7 +1444,7 @@ fn eventColor(ev: sim.WorldEvent) rl.Color {
 
 fn drawKey(app: *App, x: f32, top: f32) void {
     const w: f32 = 300;
-    const h: f32 = 368;
+    const h: f32 = 386;
     panel(x, top, w, h);
 
     var y = top + 10;
@@ -1520,6 +1546,9 @@ fn drawKey(app: *App, x: f32, top: f32) void {
     text(x + 34, y, 11, rgb(175, 180, 195), "Shelter / Cache", .{});
     rl.DrawPoly(.{ .x = x + 158, .y = y + 6 }, 6, 6, 0, rgb(212, 152, 72));
     text(x + 170, y, 11, rgb(175, 180, 195), "Wild Prey", .{});
+    y += 17;
+    rl.DrawPoly(.{ .x = x + 22, .y = y + 6 }, 4, 6.5, 0, rgb(205, 38, 72));
+    text(x + 34, y, 11, rgb(245, 145, 165), "Apex Predator (hunts outside shelters)", .{});
 }
 
 fn drawMultiGlowSwatch(cx: f32, cy: f32, cols: []const rl.Color) void {

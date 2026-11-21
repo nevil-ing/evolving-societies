@@ -177,6 +177,26 @@ pub const Prey = struct {
     max_hp: f32 = 90,
     flee_timer: f32 = 0,
     stagger_timer: f32 = 0,
+
+    pub fn radius(_: *const Prey) f32 {
+        return 12;
+    }
+};
+
+pub const Predator = struct {
+    pos: Vec2,
+    heading: f32,
+    hp: f32 = 160,
+    max_hp: f32 = 160,
+    energy: f32 = 100,
+    lunge_timer: f32 = 0,
+    flee_timer: f32 = 0,
+    stagger_timer: f32 = 0,
+    kills: u32 = 0,
+
+    pub fn radius(_: *const Predator) f32 {
+        return 13;
+    }
 };
 
 pub const MemoryKind = enum(u8) { food, material, shelter, danger, prey };
@@ -226,7 +246,7 @@ pub fn phaseRemaining(time: f32) f32 {
     return cycle_length - t;
 }
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, world_bloom, world_storm };
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, predator_slain, cache_raided, world_bloom, world_storm };
 
 pub const WorldEvent = struct {
     time: f32,
@@ -333,7 +353,11 @@ pub const Entity = struct {
     near_material: ?u32 = null,
     near_structure: ?u32 = null,
     near_cache: ?u32 = null,
+    enemy_structure: ?u32 = null,
     near_prey: ?u32 = null,
+    near_predator: ?u32 = null,
+    predator_dist: f32 = sense_range,
+    intruder_in_home: bool = false,
     enemy: ?u32 = null,
     enemy_dist: f32 = 0,
     enemies_near: u32 = 0,
@@ -506,6 +530,8 @@ pub const SocietyStats = struct {
     tools_crafted: u32 = 0,
     structures_built: u32 = 0,
     prey_hunted: u32 = 0,
+    predators_slain: u32 = 0,
+    raids_suffered: u32 = 0,
     discovered_tools: bool = false,
     discovered_building: bool = false,
 };
@@ -520,8 +546,11 @@ pub const World = struct {
     materials: std.ArrayList(Material) = .empty,
     structures: std.ArrayList(Structure) = .empty,
     prey: std.ArrayList(Prey) = .empty,
+    predators: std.ArrayList(Predator) = .empty,
     material_timer: f32 = 0,
     prey_timer: f32 = 0,
+    predator_timer: f32 = 0,
+    raid_cooldown: f32 = 0,
     field: pher.Field,
     time: f32 = 0,
     next_id: u32 = 1,
@@ -577,8 +606,11 @@ pub const World = struct {
         w.materials.clearRetainingCapacity();
         w.structures.clearRetainingCapacity();
         w.prey.clearRetainingCapacity();
+        w.predators.clearRetainingCapacity();
         w.material_timer = 0;
         w.prey_timer = 0;
+        w.predator_timer = 0;
+        w.raid_cooldown = 0;
         w.field.clear();
         w.prng = .init(seed);
         w.time = 0;
@@ -644,6 +676,7 @@ pub const World = struct {
         for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .wood, .amount = 45 });
         for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .stone, .amount = 45 });
         try w.spawnPrey(5);
+        try w.spawnPredators(2);
     }
 
     const patch_items = 8;
@@ -912,14 +945,49 @@ pub const World = struct {
         return n;
     }
 
+    pub fn predatorCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (w.predators.items) |p| if (p.hp > 0) {
+            n += 1;
+        };
+        return n;
+    }
+
+    /// Spawn Apex Predators in the frontier (placed clear of society centers at spawn).
+    pub fn spawnPredators(w: *World, count: usize) !void {
+        const wild = bounds.inset(120);
+        for (0..count) |_| {
+            if (w.predators.items.len >= 6) break;
+            var pos = w.randomIn(wild);
+            var tries: usize = 0;
+            while (tries < 12) : (tries += 1) {
+                var safe = true;
+                for (w.territories) |t| {
+                    if (pos.dist(t.center()) < 260) {
+                        safe = false;
+                        break;
+                    }
+                }
+                if (safe) break;
+                pos = w.randomIn(wild);
+            }
+            try w.predators.append(w.gpa, .{
+                .pos = pos,
+                .heading = w.rng().float(f32) * std.math.tau,
+            });
+        }
+    }
+
     /// Advance the simulation by one fixed tick.
     pub fn step(w: *World, dt: f32) !void {
         w.time += dt;
+        w.raid_cooldown = @max(0, w.raid_cooldown - dt);
         w.field.update(dt);
         try w.updateFood(dt);
         if (!w.forage_only) {
             try w.updateMaterials(dt);
             try w.updatePrey(dt);
+            try w.updatePredators(dt);
             w.updateStructures(dt);
         }
 
@@ -930,6 +998,7 @@ pub const World = struct {
             w.removeEaten();
             w.removeDepletedMaterials();
             w.removeDeadPrey();
+            w.removeDeadPredators();
             w.removeCollapsedStructures();
             try w.rebuildGrid();
             w.think();
@@ -1027,6 +1096,121 @@ pub const World = struct {
         if (w.prey_timer >= 45) {
             w.prey_timer = 0;
             if (w.scarcity != .none and w.preyCount() < 5) try w.spawnPrey(1);
+        }
+    }
+
+    fn updatePredators(w: *World, dt: f32) !void {
+        const edge = bounds.inset(45);
+        for (w.predators.items) |*p| {
+            if (p.hp <= 0) continue;
+            p.flee_timer = @max(0, p.flee_timer - dt);
+            p.stagger_timer = @max(0, p.stagger_timer - dt);
+            p.lunge_timer = @max(0, p.lunge_timer - dt);
+            p.energy = @max(10, p.energy - 0.35 * dt);
+
+            // Scan nearby entities: stalk isolated / vulnerable targets outside shelters,
+            // but recoil and flee if outnumbered by 3+ spear-wielding defenders!
+            var best_prey: ?usize = null;
+            var best_score: f32 = 1e9;
+            var spear_defenders: u32 = 0;
+            var threat_cx: f32 = 0;
+            var threat_cy: f32 = 0;
+            const cc = cellCoords(p.pos);
+            const x0: usize = cc[0] -| 3;
+            const x1: usize = @min(grid_cols - 1, cc[0] + 3);
+            const y0: usize = cc[1] -| 3;
+            const y1: usize = @min(grid_rows - 1, cc[1] + 3);
+            for (y0..y1 + 1) |gy| {
+                for (x0..x1 + 1) |gx| {
+                    var cur = w.grid_head[gy * grid_cols + gx];
+                    while (cur >= 0) {
+                        const ei: usize = @intCast(cur);
+                        cur = w.grid_next.items[ei];
+                        const e = &w.entities.items[ei];
+                        if (e.dead != null) continue;
+                        const d = p.pos.dist(e.pos);
+                        if (d > 240) continue;
+                        if (e.tool == .spear and d < 90) {
+                            spear_defenders += 1;
+                            threat_cx += e.pos.x;
+                            threat_cy += e.pos.y;
+                        }
+                        if (e.in_shelter) continue; // completed shelters protect beings inside!
+                        // Prefer isolated, young, or weakened stragglers.
+                        const vuln: f32 = if (!e.mature()) 0.65 else if (e.energy < 55) 0.75 else 1.0;
+                        const crowd_pen: f32 = 1.0 + @as(f32, @floatFromInt(@min(e.allies_near, 6))) * 0.25;
+                        const score = d * vuln * crowd_pen;
+                        if (score < best_score) {
+                            best_score = score;
+                            best_prey = ei;
+                        }
+                    }
+                }
+            }
+
+            if (spear_defenders >= 3 or p.hp < 45) {
+                if (spear_defenders > 0) {
+                    const avg = Vec2{ .x = threat_cx / @as(f32, @floatFromInt(spear_defenders)), .y = threat_cy / @as(f32, @floatFromInt(spear_defenders)) };
+                    p.heading = std.math.atan2(p.pos.y - avg.y, p.pos.x - avg.x);
+                }
+                p.flee_timer = @max(p.flee_timer, 3.0);
+            }
+
+            var spd: f32 = 24;
+            if (p.flee_timer > 0) {
+                spd = if (p.stagger_timer > 0) 20 else 50;
+            } else if (best_prey) |ti| {
+                const target_e = &w.entities.items[ti];
+                const d = p.pos.dist(target_e.pos);
+                p.heading += steerTo(p.heading, p.pos, target_e.pos, 4.2) * dt;
+                if (d < 85 and p.lunge_timer <= 0) p.lunge_timer = 1.2;
+                spd = if (p.stagger_timer > 0) 18 else if (p.lunge_timer > 0) 54 else 38;
+
+                // Strike prey if within bite reach.
+                if (d < p.radius() + target_e.radius() + 6 and target_e.dead == null) {
+                    const dmg = 28 * (1 - 0.25 * target_e.skill(.combat)) * dt;
+                    target_e.energy -= dmg;
+                    target_e.resting = false;
+                    target_e.remember(.danger, p.pos, 1.0);
+                    target_e.genome.cog.learn(-dmg * 0.16);
+                    target_e.genome.cog.noradrenaline = 1.0;
+                    if (target_e.call_cooldown <= 0) w.emitSignal(ti, .danger_call, p.pos);
+                    w.field.deposit(alarmChannel(target_e.society), target_e.pos.x, target_e.pos.y, dmg * 0.9);
+                    if (target_e.energy <= 0 and target_e.dead == null) {
+                        p.kills += 1;
+                        p.energy = @min(140, p.energy + 45);
+                        p.hp = @min(p.max_hp, p.hp + 25);
+                        try w.killCorpse(ti, .killed, 18);
+                    }
+                }
+            } else {
+                p.hp = @min(p.max_hp, p.hp + 1.0 * dt);
+                p.heading += w.rng().floatNorm(f32) * 0.8 * dt;
+            }
+
+            p.pos.x += @cos(p.heading) * spd * dt;
+            p.pos.y += @sin(p.heading) * spd * dt;
+            if (!edge.contains(p.pos)) {
+                p.pos.x = std.math.clamp(p.pos.x, edge.x, edge.x + edge.w);
+                p.pos.y = std.math.clamp(p.pos.y, edge.y, edge.y + edge.h);
+                p.heading += std.math.pi;
+            }
+        }
+        w.predator_timer += dt;
+        if (w.predator_timer >= 120) {
+            w.predator_timer = 0;
+            if (w.scarcity != .none and w.predatorCount() < 2) try w.spawnPredators(1);
+        }
+    }
+
+    fn removeDeadPredators(w: *World) void {
+        var i: usize = 0;
+        while (i < w.predators.items.len) {
+            if (w.predators.items[i].hp <= 0) {
+                _ = w.predators.swapRemove(i);
+                continue;
+            }
+            i += 1;
         }
     }
 
@@ -1293,13 +1477,21 @@ pub const World = struct {
             e.cannibal_target = true;
         }
 
-        // Materials, structures (shelters & food caches), and wild prey.
+        // Materials, structures (friendly & enemy), wild prey, and apex predators.
         e.near_material = null;
         e.near_structure = null;
         e.near_cache = null;
+        e.enemy_structure = null;
         e.near_prey = null;
+        e.near_predator = null;
+        e.predator_dist = sense_range;
         e.in_shelter = false;
+        e.intruder_in_home = false;
         if (!w.forage_only) {
+            const my_home = w.territories[e.society];
+            if (e.enemy) |ei| {
+                if (my_home.contains(w.entities.items[ei].pos)) e.intruder_in_home = true;
+            }
             var mat_dist: f32 = sense_range;
             for (w.materials.items, 0..) |m_item, mi| {
                 if (m_item.amount <= 0) continue;
@@ -1311,9 +1503,17 @@ pub const World = struct {
             }
             var str_dist: f32 = sense_range * 1.4;
             var cache_dist: f32 = sense_range * 1.25;
+            var estr_dist: f32 = sense_range;
             for (w.structures.items, 0..) |st, si| {
-                if (st.integrity <= 0 or st.society != e.society) continue;
+                if (st.integrity <= 0) continue;
                 const d = st.pos.dist(e.pos);
+                if (st.society != e.society) {
+                    if (st.complete() and d < estr_dist) {
+                        estr_dist = d;
+                        e.enemy_structure = @intCast(si);
+                    }
+                    continue;
+                }
                 if (st.complete() and st.kind == .shelter and d < st.radius()) {
                     e.in_shelter = true;
                 }
@@ -1335,6 +1535,19 @@ pub const World = struct {
                 if (d < prey_dist) {
                     prey_dist = d;
                     e.near_prey = @intCast(pi);
+                }
+            }
+            var pred_dist: f32 = sense_range * 1.25;
+            for (w.predators.items, 0..) |pd, pi| {
+                if (pd.hp <= 0) continue;
+                const d = pd.pos.dist(e.pos);
+                if (d < pred_dist) {
+                    pred_dist = d;
+                    e.near_predator = @intCast(pi);
+                    e.predator_dist = @min(d, sense_range);
+                }
+                if (d < sense_range * 1.4 and my_home.contains(pd.pos)) {
+                    e.intruder_in_home = true;
                 }
             }
         }
@@ -1359,9 +1572,9 @@ pub const World = struct {
                 mem.age += dt;
                 mem.confidence = @max(0, mem.confidence - 0.0025 * dt);
             }
-            const threat_arousal: f32 = if (e.enemies_near > 0 or e.alarm > 0.2 or e.heard_kind == .danger_call) 0.9 else if (w.phase == .storm and !e.in_shelter) 0.55 else 0.15;
+            const threat_arousal: f32 = if (e.near_predator != null or e.enemies_near > 0 or e.alarm > 0.2 or e.heard_kind == .danger_call) 0.92 else if (w.phase == .storm and !e.in_shelter) 0.55 else 0.15;
             g.cog.noradrenaline = std.math.clamp(g.cog.noradrenaline + (threat_arousal - g.cog.noradrenaline) * @min(1, dt * 1.4), 0.05, 1.0);
-            const calm_target: f32 = if (e.energy > 80 and (e.in_shelter or e.allies_near > 0) and e.enemies_near == 0) 0.85 else if (e.energy < 40 or e.enemies_near > 0) 0.15 else 0.5;
+            const calm_target: f32 = if (e.energy > 80 and (e.in_shelter or e.allies_near > 0) and e.enemies_near == 0 and e.near_predator == null) 0.85 else if (e.energy < 40 or e.enemies_near > 0 or e.near_predator != null) 0.15 else 0.5;
             g.cog.serotonin = std.math.clamp(g.cog.serotonin + (calm_target - g.cog.serotonin) * @min(1, dt * 0.6), 0.05, 1.0);
             g.cog.dopamine = std.math.clamp(g.cog.dopamine + (0.5 - g.cog.dopamine) * @min(1, dt * 0.25), 0.05, 1.0);
         }
@@ -1415,6 +1628,8 @@ pub const World = struct {
                 env_sig,
                 mem_pos_conf,
                 mem_social_cue,
+                if (e.near_predator != null) 1 - e.predator_dist / sense_range else 0,
+                if (e.intruder_in_home) 1 else 0,
             });
         }
 
@@ -1446,10 +1661,10 @@ pub const World = struct {
             w.prey.items[e.near_prey.?].pos
         else switch (e.action) {
             .forage => null,
-            .fight => if (e.enemy) |o| w.entities.items[o].pos else null,
+            .fight => if (e.near_predator) |pi| w.predators.items[pi].pos else if (e.enemy) |o| w.entities.items[o].pos else if (e.enemy_structure) |si| w.structures.items[si].pos else null,
             .mate => if (e.mate) |o| w.entities.items[o].pos else null,
             .socialize => if (e.ally) |o| (if (e.ally_dist > 30 + 60 * g.trait(.sociability)) w.entities.items[o].pos else null) else null,
-            .flee => if (e.enemy) |o| away(e.pos, w.entities.items[o].pos) else null,
+            .flee => if (e.near_predator) |pi| away(e.pos, w.predators.items[pi].pos) else if (e.enemy) |o| away(e.pos, w.entities.items[o].pos) else null,
             .gather => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else (if (e.near_structure) |si| w.structures.items[si].pos else null),
             .craft_tool => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else null,
             .build => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else (if (e.near_structure) |si| w.structures.items[si].pos else if (!w.territories[e.society].contains(e.pos)) w.territories[e.society].center() else null),
@@ -1940,6 +2155,79 @@ pub const World = struct {
                             try w.resources.append(w.gpa, .{ .pos = .{ .x = pr.pos.x - 8, .y = pr.pos.y + 6 }, .food = .universal, .amount = 36, .patch = null, .corpse = false });
                             w.field.deposit(scentChannel(.universal), pr.pos.x, pr.pos.y, 3.0);
                             w.field.deposit(scentChannel(.meat), pr.pos.x, pr.pos.y, 3.0);
+                        }
+                    }
+                }
+            }
+            // 6. Cross-society Food Cache raiding & structure sieging (real territorial stakes!).
+            if (e.enemy_structure) |esi| {
+                const est = &w.structures.items[esi];
+                if (est.complete() and est.integrity > 0 and est.pos.dist(e.pos) < est.radius() + 12) {
+                    if (est.kind == .cache and est.stored_food > 0 and e.energy < 110) {
+                        const stolen = @min(est.stored_food, 22 * dt);
+                        est.stored_food -= stolen;
+                        e.energy = @min(max_energy, e.energy + stolen);
+                        e.food_eaten += stolen;
+                        e.since_meal = 0;
+                        e.feeding = true;
+                        e.genome.cog.learn(0.55 * dt);
+                        w.field.deposit(alarmChannel(est.society), est.pos.x, est.pos.y, 4.0 * dt);
+                        if (w.raid_cooldown <= 0) {
+                            w.raid_cooldown = 45;
+                            w.stats[est.society].raids_suffered += 1;
+                            w.pushEvent(est.society, .cache_raided, e.society);
+                        }
+                    } else if (e.action == .fight) {
+                        const siege = (10 + 16 * g.trait(.aggression)) * (if (e.tool == .spear) @as(f32, 1.6) else 1.0) * dt;
+                        est.integrity -= siege;
+                        e.energy -= 2.5 * dt;
+                        w.field.deposit(alarmChannel(est.society), est.pos.x, est.pos.y, 3.0 * dt);
+                    }
+                }
+            }
+
+            // 7. Defending against Apex Predators (spears give safe reach, stagger, and trophy feast!).
+            if (e.action == .fight) {
+                if (e.near_predator) |pdi| {
+                    const pd = &w.predators.items[pdi];
+                    const has_spear = e.tool == .spear;
+                    const preach = e.radius() + pd.radius() + (if (has_spear) @as(f32, 14) else 5);
+                    if (pd.hp > 0 and pd.pos.dist(e.pos) < preach) {
+                        const atk = if (has_spear)
+                            (24 + 28 * g.trait(.aggression)) * (1 + 0.5 * e.skill(.toolcraft) + 0.35 * e.skill(.combat)) * dt
+                        else
+                            (8 + 14 * g.trait(.aggression)) * (1 + 0.25 * e.skill(.combat)) * dt;
+                        pd.hp -= atk;
+                        e.energy -= 3.0 * dt;
+                        e.addSkill(.combat, 0.06 * dt);
+                        if (has_spear) {
+                            pd.stagger_timer = 1.4;
+                            e.addSkill(.toolcraft, 0.08 * dt);
+                            e.tool_durability -= 4.5 * dt;
+                            if (e.tool_durability <= 0) e.tool = .none;
+                        }
+                        if (e.call_cooldown <= 0) w.emitSignal(i, .danger_call, pd.pos);
+                        if (pd.hp <= 0) {
+                            e.kills += 1;
+                            e.addSkill(.combat, 0.14);
+                            e.addSkill(.toolcraft, 0.18);
+                            e.genome.cog.learn(1.5);
+                            _ = e.genome.cog.sproutFromExperience(w.rng());
+                            w.stats[e.society].predators_slain += 1;
+                            w.pushEvent(e.society, .predator_slain, w.stats[e.society].predators_slain);
+                            // Massive trophy harvest so collective defense pays off enormously!
+                            for (0..4) |k| {
+                                const ang = @as(f32, @floatFromInt(k)) * (std.math.tau / 4.0);
+                                try w.resources.append(w.gpa, .{
+                                    .pos = .{ .x = pd.pos.x + 12 * @cos(ang), .y = pd.pos.y + 12 * @sin(ang) },
+                                    .food = if (k < 2) .meat else .universal,
+                                    .amount = 50,
+                                    .patch = null,
+                                    .corpse = false,
+                                });
+                            }
+                            w.field.deposit(scentChannel(.universal), pd.pos.x, pd.pos.y, 4.0);
+                            w.field.deposit(scentChannel(.meat), pd.pos.x, pd.pos.y, 4.0);
                         }
                     }
                 }
@@ -2484,6 +2772,123 @@ pub const World = struct {
 
                             if (iter == 0 and (a.bump_cooldown <= 0 or b.bump_cooldown <= 0)) {
                                 w.onTouch(a, b, nx, ny);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Solid collisions between entities and Wild Prey / Apex Predators (never ghosting through!).
+        if (!w.forage_only) {
+            for (w.prey.items) |*pr| {
+                if (pr.hp <= 0) continue;
+                const rp = pr.radius();
+                const mp = rp * rp * 2.0;
+                const cc = cellCoords(pr.pos);
+                const x0: usize = cc[0] -| 1;
+                const x1: usize = @min(grid_cols - 1, cc[0] + 1);
+                const y0: usize = cc[1] -| 1;
+                const y1: usize = @min(grid_rows - 1, cc[1] + 1);
+                for (y0..y1 + 1) |gy| {
+                    for (x0..x1 + 1) |gx| {
+                        var cur = w.grid_head[gy * grid_cols + gx];
+                        while (cur >= 0) {
+                            const ei: usize = @intCast(cur);
+                            cur = w.grid_next.items[ei];
+                            const e = &items[ei];
+                            if (e.dead != null) continue;
+                            const re = e.radius();
+                            const min_d = re + rp;
+                            const dx = e.pos.x - pr.pos.x;
+                            const dy = e.pos.y - pr.pos.y;
+                            const d2 = dx * dx + dy * dy;
+                            if (d2 >= min_d * min_d) continue;
+                            const dist = if (d2 > 1e-6) @sqrt(d2) else 0.001;
+                            const nx = if (d2 > 1e-6) dx / dist else 1;
+                            const ny = if (d2 > 1e-6) dy / dist else 0;
+                            const pen = min_d - dist;
+                            const me = re * re;
+                            const inv = 1.0 / (me + mp);
+                            e.pos.x += nx * pen * mp * inv;
+                            e.pos.y += ny * pen * mp * inv;
+                            pr.pos.x -= nx * pen * me * inv;
+                            pr.pos.y -= ny * pen * me * inv;
+                            if (e.bump_cooldown <= 0) {
+                                e.bump_cooldown = 0.4;
+                                e.resting = false;
+                                e.bump_vel.x += nx * 28;
+                                e.bump_vel.y += ny * 28;
+                                e.remember(.prey, pr.pos, 0.7);
+                                pr.flee_timer = @max(pr.flee_timer, 1.2);
+                                pr.heading = std.math.atan2(-ny, -nx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (w.predators.items) |*pd| {
+                if (pd.hp <= 0) continue;
+                const rp = pd.radius();
+                const mp = rp * rp * 2.5;
+                // Completed Shelters physically block Apex Predators from entering!
+                for (w.structures.items) |*st| {
+                    if (!st.complete() or st.kind != .shelter or st.integrity <= 0) continue;
+                    const min_s = st.radius() + rp;
+                    const dx = pd.pos.x - st.pos.x;
+                    const dy = pd.pos.y - st.pos.y;
+                    const d2 = dx * dx + dy * dy;
+                    if (d2 < min_s * min_s) {
+                        const dist = if (d2 > 1e-6) @sqrt(d2) else 0.001;
+                        const nx = if (d2 > 1e-6) dx / dist else 1;
+                        const ny = if (d2 > 1e-6) dy / dist else 0;
+                        pd.pos.x = st.pos.x + nx * min_s;
+                        pd.pos.y = st.pos.y + ny * min_s;
+                        pd.heading = std.math.atan2(ny, nx);
+                        st.integrity -= 0.15; // predator batters the shelter wall slightly
+                        w.field.deposit(alarmChannel(st.society), st.pos.x, st.pos.y, 1.2);
+                    }
+                }
+
+                const cc = cellCoords(pd.pos);
+                const x0: usize = cc[0] -| 1;
+                const x1: usize = @min(grid_cols - 1, cc[0] + 1);
+                const y0: usize = cc[1] -| 1;
+                const y1: usize = @min(grid_rows - 1, cc[1] + 1);
+                for (y0..y1 + 1) |gy| {
+                    for (x0..x1 + 1) |gx| {
+                        var cur = w.grid_head[gy * grid_cols + gx];
+                        while (cur >= 0) {
+                            const ei: usize = @intCast(cur);
+                            cur = w.grid_next.items[ei];
+                            const e = &items[ei];
+                            if (e.dead != null) continue;
+                            const re = e.radius();
+                            const min_d = re + rp;
+                            const dx = e.pos.x - pd.pos.x;
+                            const dy = e.pos.y - pd.pos.y;
+                            const d2 = dx * dx + dy * dy;
+                            if (d2 >= min_d * min_d) continue;
+                            const dist = if (d2 > 1e-6) @sqrt(d2) else 0.001;
+                            const nx = if (d2 > 1e-6) dx / dist else 1;
+                            const ny = if (d2 > 1e-6) dy / dist else 0;
+                            const pen = min_d - dist;
+                            const me = re * re;
+                            const inv = 1.0 / (me + mp);
+                            e.pos.x += nx * pen * mp * inv;
+                            e.pos.y += ny * pen * mp * inv;
+                            pd.pos.x -= nx * pen * me * inv;
+                            pd.pos.y -= ny * pen * me * inv;
+                            if (e.bump_cooldown <= 0) {
+                                e.bump_cooldown = 0.35;
+                                e.resting = false;
+                                e.action_timer = 0;
+                                e.bump_vel.x += nx * 58;
+                                e.bump_vel.y += ny * 58;
+                                e.remember(.danger, pd.pos, 1.0);
+                                w.field.deposit(alarmChannel(e.society), e.pos.x, e.pos.y, 2.5);
+                                w.addContact(e.pos, .rival_clash, e.society);
                             }
                         }
                     }

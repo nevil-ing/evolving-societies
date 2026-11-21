@@ -306,9 +306,9 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
     // Run a decision then apply positive reward: weights, predictor, and dopamine should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2 });
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0 });
     // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
-    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     var hidden_mag: f32 = 0;
     for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
     try std.testing.expect(hidden_mag > 1e-3);
@@ -536,6 +536,7 @@ test "world: entities craft stone spears and hunt wild prey for a rich harvest" 
     var w = try World.init(gpa, &c, 2027);
     w.clearAllFood();
     w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
     while (w.entities.items.len > 1) {
         const last = w.entities.pop().?;
         last.genome.deinit(gpa);
@@ -551,7 +552,7 @@ test "world: entities craft stone spears and hunt wild prey for a rich harvest" 
     hunter.genome.traits[@backingInt(gen.Trait.aggression)] = 0.9;
     hunter.genome.traits[@backingInt(gen.Trait.speed)] = 0.95;
     hunter.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.craft_tool)] = 4.0;
-    try w.prey.append(gpa, .{ .pos = .{ .x = 18, .y = 0 }, .heading = 0, .hp = 45, .max_hp = 90 });
+    try w.prey.append(gpa, .{ .pos = .{ .x = 26, .y = 0 }, .heading = 0, .hp = 45, .max_hp = 90 });
 
     for (0..60 * 5) |_| try w.step(1.0 / 60.0);
 
@@ -708,4 +709,49 @@ test "world: developmental life stages progress from infant to juvenile to adult
     e.age = e.lifespan * sim.elder_frac + 10;
     try std.testing.expectEqual(sim.LifeStage.elder, e.stage());
     try std.testing.expectEqual(sim.Role.elder, e.role());
+}
+
+test "world: wildlife collisions are solid, shelters block predators, and rivals can raid caches" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 5150);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    w.structures.clearRetainingCapacity();
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    // 1. Entity 0 overlaps a Wild Prey: collision must push them apart (never ghost through!).
+    const e0 = &w.entities.items[0];
+    e0.society = 0;
+    e0.age = sim.maturity_age + 20;
+    e0.energy = 80;
+    e0.pos = .{ .x = 0, .y = 0 };
+    try w.prey.append(gpa, .{ .pos = .{ .x = 4, .y = 0 }, .heading = 0 });
+
+    // 2. Predator placed inside a completed Shelter must be physically pushed outside its radius.
+    try w.structures.append(gpa, .{ .pos = .{ .x = 300, .y = 0 }, .society = 1, .kind = .shelter, .progress = 100, .builder_id = 1 });
+    try w.predators.append(gpa, .{ .pos = .{ .x = 305, .y = 0 }, .heading = 0 });
+
+    // 3. Entity 1 (Triangle) placed next to a Circle Food Cache raids stored food.
+    const e1 = &w.entities.items[1];
+    e1.society = 0;
+    e1.age = sim.maturity_age + 20;
+    e1.energy = 60;
+    e1.pos = .{ .x = -300, .y = 0 };
+    try w.structures.append(gpa, .{ .pos = .{ .x = -300, .y = 0 }, .society = 1, .kind = .cache, .progress = 100, .stored_food = 100, .builder_id = 2 });
+
+    for (0..30) |_| try w.step(1.0 / 60.0);
+
+    try std.testing.expect(w.entities.items[0].pos.dist(w.prey.items[0].pos) >= e0.radius() + w.prey.items[0].radius() - 0.5);
+    try std.testing.expect(w.predators.items[0].pos.dist(w.structures.items[0].pos) >= w.structures.items[0].radius() + w.predators.items[0].radius() - 0.5);
+    try std.testing.expect(w.structures.items[1].stored_food < 99.0);
+    try std.testing.expect(w.stats[1].raids_suffered >= 1);
 }

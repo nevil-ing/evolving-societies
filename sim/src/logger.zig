@@ -68,7 +68,7 @@ pub const RunLogger = struct {
                 "avg_foraging,avg_navigation,avg_combat,avg_care,avg_building,avg_toolcraft," ++
                 "avg_neurons,avg_synapses,outside_home_frac,huddled_frac,active_lineages," ++
                 "foragers,scouts,guards,caretakers,builders,hunters,elders," ++
-                "signals_sent,signals_acted,cannibal_kills,tools_held,structures_built,prey_hunted,avg_recurrent,avg_memories\n",
+                "signals_sent,signals_acted,cannibal_kills,tools_held,structures_built,prey_hunted,predators_slain,raids_suffered,avg_recurrent,avg_memories\n",
         );
         return self;
     }
@@ -179,7 +179,7 @@ pub const RunLogger = struct {
 
             const s2 = std.fmt.bufPrint(
                 &line,
-                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d:.2},{d:.2}\n",
+                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d:.2},{d:.2}\n",
                 .{
                     skills[0] / d,
                     skills[1] / d,
@@ -205,6 +205,8 @@ pub const RunLogger = struct {
                     tools_held,
                     st.structures_built,
                     st.prey_hunted,
+                    st.predators_slain,
+                    st.raids_suffered,
                     recurrent / d,
                     memories / d,
                 },

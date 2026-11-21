@@ -86,9 +86,10 @@ def main():
         if "signals_sent" in end:
             print(f"  Communication: signals_sent={end['signals_sent']} | kin_responses={end['signals_acted']}")
         if "structures_built" in end:
+            pred_str = f" | predators_slain={end['predators_slain']} | raids_suffered={end['raids_suffered']}" if "predators_slain" in end else ""
             print(
                 f"  Tools & building: tools_held={last['tools_held']} | "
-                f"structures_built={end['structures_built']} | prey_hunted={end['prey_hunted']}"
+                f"structures_built={end['structures_built']} | prey_hunted={end['prey_hunted']}{pred_str}"
             )
         extra_roles = f" builders={last['builders']} hunters={last['hunters']}" if "builders" in last else ""
         print(

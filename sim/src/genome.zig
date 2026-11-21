@@ -31,7 +31,7 @@ pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 ///   0 .. social_inputs-1                          : sensory, state & memory inputs
 ///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable leaky recurrent hidden neurons
 ///   out_base .. max_cog_nodes-1                   : action output neurons
-pub const social_inputs = 18;
+pub const social_inputs = 20;
 pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
 pub const social_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
 pub const max_cog_hidden = 24;
