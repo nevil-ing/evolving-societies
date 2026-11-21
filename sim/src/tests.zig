@@ -216,7 +216,7 @@ test "world: skills pass down to offspring and civilization alerts fire" {
     }
     for (w.entities.items, 0..) |*e, idx| {
         e.society = 1;
-        e.age = 50;
+        e.age = sim.maturity_age + 20;
         e.energy = 140;
         e.repro_cooldown = 0;
         e.pos = .{ .x = @as(f32, @floatFromInt(idx)) * 18, .y = 0 };
@@ -496,7 +496,7 @@ test "world: starvation cannibalism emerges when all food is removed" {
     }
     const hunter = &w.entities.items[0];
     hunter.society = 0; // Triangles (meat-eater)
-    hunter.age = 45;
+    hunter.age = sim.maturity_age + 20;
     hunter.energy = 32;
     hunter.since_meal = 28;
     hunter.pos = .{ .x = 0, .y = 0 };
@@ -543,7 +543,7 @@ test "world: entities craft stone spears and hunt wild prey for a rich harvest" 
     }
     const hunter = &w.entities.items[0];
     hunter.society = 1;
-    hunter.age = 50;
+    hunter.age = sim.maturity_age + 20;
     hunter.energy = 85;
     hunter.pos = .{ .x = 0, .y = 0 };
     hunter.carrying = .stone;
@@ -584,7 +584,7 @@ test "world: stigmergic shelters protect during storms and food caches feed star
     // Builder finishes the shelter from carried stone; hungry kin eats from the Food Cache despite 0 world food!
     const bld = &w.entities.items[0];
     bld.society = 2;
-    bld.age = 50;
+    bld.age = sim.maturity_age + 20;
     bld.energy = 100;
     bld.pos = home;
     bld.carrying = .stone;
@@ -672,4 +672,40 @@ test "world: uncapped population scales cleanly past 600 via spatial grid" {
     try std.testing.expect(w.entities.items.len > 700);
     for (0..10) |_| try w.step(1.0 / 60.0);
     try std.testing.expect(w.entities.items.len > 700);
+}
+
+test "world: developmental life stages progress from infant to juvenile to adult to elder" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 4040);
+    const e = &w.entities.items[0];
+    e.energy = 130;
+    e.repro_cooldown = 0;
+
+    e.age = 10;
+    try std.testing.expectEqual(sim.LifeStage.infant, e.stage());
+    try std.testing.expect(!e.mature());
+    try std.testing.expect(!e.readyToMate());
+    const r_infant = e.radius();
+
+    e.age = sim.infant_age + 30;
+    try std.testing.expectEqual(sim.LifeStage.juvenile, e.stage());
+    try std.testing.expect(!e.mature());
+    try std.testing.expect(!e.readyToMate());
+    const r_juv = e.radius();
+    try std.testing.expect(r_juv > r_infant);
+
+    e.age = sim.maturity_age + 30;
+    try std.testing.expectEqual(sim.LifeStage.adult, e.stage());
+    try std.testing.expect(e.mature());
+    try std.testing.expect(e.readyToMate());
+    const r_adult = e.radius();
+    try std.testing.expect(r_adult > r_juv);
+
+    e.age = e.lifespan * sim.elder_frac + 10;
+    try std.testing.expectEqual(sim.LifeStage.elder, e.stage());
+    try std.testing.expectEqual(sim.Role.elder, e.role());
 }

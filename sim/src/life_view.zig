@@ -608,6 +608,11 @@ fn drawEntity(e: *const sim.Entity, zoom: f32, selected: bool) void {
             rl.DrawPolyLinesEx(c, 4, size * 1.25, deg + 45, thick, outline);
         },
     }
+    if (e.stage() == .infant) {
+        rl.DrawCircleLinesV(c, size + 2.0, withAlpha(rgb(255, 240, 195), 115));
+    } else if (e.stage() == .elder) {
+        rl.DrawCircleLinesV(c, size + 2.4, withAlpha(rgb(215, 225, 245), 115));
+    }
     if (e.feeding) rl.DrawCircleV(.{ .x = c.x + size * @cos(e.heading), .y = c.y + size * @sin(e.heading) }, 2, rgb(255, 255, 255));
     // Visible carried materials & crafted tools (Spear / Basket).
     if (e.carrying != .none) {
@@ -1563,11 +1568,11 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     panel(x, y, 300, h);
     y += 8;
     text(x + 12, y, 17, societyColor(s), "{s} #{d}", .{ s.name, e.id });
-    text(x + 128, y + 3, 12, rgb(170, 210, 240), "{s}", .{@tagName(e.role())});
+    text(x + 116, y + 4, 11, rgb(170, 210, 240), "{s} ({s})", .{ @tagName(e.role()), @tagName(e.stage()) });
     if (smallBtn(rect(x + 232, y + 1, 56, 17), "Capture", rgb(44, 68, 86))) try captureSpecimen(app, e);
-    if (e.hybrid) text(x + 184, y + 3, 11, rgb(255, 220, 60), "HYB", .{});
     y += 22;
     text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lin #{d}  age {d:.1}/{d:.0}m  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age / 60, e.lifespan / 60, e.children, e.kills });
+    if (e.hybrid) text(x + 258, y + 1, 10, rgb(255, 220, 60), "HYB", .{});
     y += 15;
     const suffix: []const u8 = if (e.cannibal_target and e.action == .fight)
         " (hunting kin)"

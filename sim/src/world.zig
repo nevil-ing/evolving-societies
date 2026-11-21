@@ -133,6 +133,8 @@ pub const Role = enum(u8) {
 };
 pub const role_count = @typeInfo(Role).@"enum".field_names.len;
 
+pub const LifeStage = enum(u8) { infant, juvenile, adult, elder };
+
 pub const MaterialKind = enum(u8) { wood, stone };
 
 pub const Material = struct {
@@ -342,11 +344,22 @@ pub const Entity = struct {
 
     dead: ?Death = null,
 
+    pub fn stage(e: *const Entity) LifeStage {
+        if (e.age < infant_age) return .infant;
+        if (e.age < maturity_age) return .juvenile;
+        if (e.age >= e.lifespan * elder_frac) return .elder;
+        return .adult;
+    }
     pub fn radius(e: *const Entity) f32 {
-        return 8 * (0.55 + 0.45 * @min(1, e.age / maturity_age));
+        return switch (e.stage()) {
+            .infant => 8 * (0.46 + 0.16 * std.math.clamp(e.age / infant_age, 0, 1)),
+            .juvenile => 8 * (0.62 + 0.36 * std.math.clamp((e.age - infant_age) / (maturity_age - infant_age), 0, 1)),
+            .adult => 8.0,
+            .elder => 8.5,
+        };
     }
     pub fn mature(e: *const Entity) bool {
-        return e.age > maturity_age;
+        return e.age >= maturity_age;
     }
     pub fn readyToMate(e: *const Entity) bool {
         const threshold = 90 - 30 * e.genome.trait(.fertility);
@@ -374,7 +387,7 @@ pub const Entity = struct {
                 best_i = i;
             }
         }
-        if (e.age > 300 and total >= 0.75) return .elder;
+        if (e.stage() == .elder or (e.age > 600 and total >= 1.1)) return .elder;
         if (e.tool == .spear and e.skill(.toolcraft) >= 0.14) return .hunter;
         if (e.skill(.building) >= 0.22 and e.skill(.building) >= e.skill(.toolcraft)) return .builder;
         if (e.skill(.toolcraft) >= 0.22) return .hunter;
@@ -461,7 +474,9 @@ pub const Entity = struct {
     }
 };
 
-pub const maturity_age: f32 = 30;
+pub const infant_age: f32 = 60; // 1 min newborn/infant stage
+pub const maturity_age: f32 = 240; // 4 min to reach reproductive adulthood (for 1-2h lifespans)
+pub const elder_frac: f32 = 0.25; // elder stage begins at 25% of lifespan (15-30 min)
 pub const max_energy: f32 = 150;
 pub const brain_hz: f32 = 20;
 pub const history_len = 400;
@@ -613,10 +628,14 @@ pub const World = struct {
             for (0..stone_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .stone, .amount = 45 });
             for (0..wood_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .wood, .amount = 45 });
 
-            for (0..25) |_| {
+            for (0..25) |k| {
                 const g = try gen.Genome.random(w.gpa, w.rng(), w.circuit.types);
                 const e = try w.addEntity(@intCast(si), w.randomIn(s.territory.inset(40)), g);
-                e.age = w.rng().float(f32) * maturity_age * 1.5;
+                // Natural starting age pyramid: ~72% young adults, ~28% growing youths.
+                e.age = if (k < 18)
+                    maturity_age + w.rng().float(f32) * 180
+                else
+                    infant_age + w.rng().float(f32) * (maturity_age - infant_age);
                 e.lineage = e.id;
                 w.recordGeneration(e);
             }
@@ -1401,12 +1420,15 @@ pub const World = struct {
 
         // Stay near home when fed and territorial; adventurous or hungry entities roam far out into the wild.
         // Desperate meat-capable predators with zero food in sight or smell hunt prey (including kin).
+        const lstage = e.stage();
         const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
-        const starving_hunt = !w.forage_only and e.enemy != null and e.visible_food == null and
+        const starving_hunt = !w.forage_only and lstage != .infant and e.enemy != null and e.visible_food == null and
             (e.cannibal_target or (e.energy < 36 and e.since_meal > 18 and e.odour < 0.08 and canEat(e, .meat) > 0 and g.trait(.aggression) > 0.58));
-        const hunting_prey = !w.forage_only and e.enemy == null and e.near_prey != null and e.energy > 35 and
+        const hunting_prey = !w.forage_only and lstage != .infant and e.enemy == null and e.near_prey != null and e.energy > 35 and
             ((e.tool == .spear and e.energy < 115) or (e.action == .fight and e.energy < 105));
-        if (starving_hunt) {
+        if (lstage == .infant and (e.action == .fight or e.action == .craft_tool or e.action == .build or e.action == .mate)) {
+            e.action = .forage;
+        } else if (starving_hunt) {
             e.action = .fight;
         } else if (e.energy < 35 and e.action != .flee) {
             e.action = .forage;
@@ -1646,7 +1668,8 @@ pub const World = struct {
         }
 
         if (e.explore_target == null and !seeking_shelter and !seeking_cache and e.recalling == null and !acted_on_signal and e.visible_food == null and target == null) {
-            const roam = 160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger;
+            const stage_roam: f32 = if (lstage == .infant) 0.3 else if (lstage == .juvenile) 0.65 else 1.0;
+            const roam = (160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger) * stage_roam;
             const home = home_rect.inset(-roam);
             if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, home_rect.center(), 2.5);
         }
@@ -1681,6 +1704,12 @@ pub const World = struct {
             speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
         }
         if (e.carrying != .none) speed *= 0.88;
+        speed *= switch (lstage) {
+            .infant => 0.72,
+            .juvenile => 0.92,
+            .adult => 1.0,
+            .elder => 0.88,
+        };
         if (w.phase == .storm and e.in_shelter and !e.feeding and e.energy > 50 and e.action != .fight and e.action != .flee) {
             speed *= 0.12;
         } else if (w.phase == .storm and e.huddled and !e.feeding and e.energy > 50) {
@@ -1784,7 +1813,13 @@ pub const World = struct {
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
         const carry_cost: f32 = if (e.carrying != .none) 0.12 else 0;
         const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0003 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
-        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult;
+        const stage_drain: f32 = switch (lstage) {
+            .infant => 0.65,
+            .juvenile => 0.85,
+            .adult => 1.0,
+            .elder => 0.92,
+        };
+        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult * stage_drain;
         e.energy -= drain * dt;
         if (e.energy < 25) e.genome.cog.learn(-0.08 * dt);
 
@@ -1958,10 +1993,11 @@ pub const World = struct {
             }
         }
 
-        // Any two ready adults that touch/meet can breed; the mate action makes them seek each other.
+        // Any two ready mature adults that court (or share high surplus/trust) and meet can breed.
         if (e.mate) |oi| {
             const o = &w.entities.items[oi];
-            if (o.pos.dist(e.pos) < e.radius() + o.radius() + 6 and e.readyToMate() and o.readyToMate()) {
+            const willing = e.action == .mate or o.action == .mate or (e.energy > 95 and o.energy > 95) or e.trustOf(o.id) > 0.25;
+            if (willing and o.pos.dist(e.pos) < e.radius() + o.radius() + 6 and e.readyToMate() and o.readyToMate()) {
                 try w.reproduce(i, oi);
             }
         }
@@ -2115,7 +2151,7 @@ pub const World = struct {
         for ([_]usize{ ai, bi }) |pi| {
             const p = &w.entities.items[pi];
             p.energy -= 25;
-            p.repro_cooldown = 30;
+            p.repro_cooldown = if (p.stage() == .elder) 180 else 90;
             p.children += 1;
             p.addSkill(.care, 0.05);
             p.genome.cog.learn(0.8);
@@ -2551,9 +2587,11 @@ pub const World = struct {
 
     fn tryShareFood(w: *World, donor: *Entity, receiver: *Entity, mid: Vec2) bool {
         const trust = donor.trustOf(receiver.id);
-        const min_donor: f32 = if (trust > 0.3) 90 else 105;
-        if (donor.energy > min_donor and receiver.energy < 75 and (donor.genome.trait(.sociability) > 0.45 or trust > 0.35)) {
-            const gift: f32 = 6 + 4 * donor.skill(.care);
+        const nurturing_youth = donor.mature() and !receiver.mature();
+        const min_donor: f32 = if (nurturing_youth) 78 else if (trust > 0.3) 90 else 105;
+        const max_recv: f32 = if (nurturing_youth) 85 else 75;
+        if (donor.energy > min_donor and receiver.energy < max_recv and (nurturing_youth or donor.genome.trait(.sociability) > 0.45 or trust > 0.35)) {
+            const gift: f32 = (if (nurturing_youth) @as(f32, 8) else 6) + 4 * donor.skill(.care);
             donor.energy -= gift;
             receiver.energy = @min(max_energy, receiver.energy + gift);
             receiver.since_meal = @min(receiver.since_meal, 4);
@@ -2581,7 +2619,13 @@ pub const World = struct {
 
     fn mentorKin(mentor: *Entity, student: *Entity) void {
         if (!mentor.mature()) return;
-        const rate = 0.06 * (0.6 + mentor.skill(.care) + if (mentor.role() == .elder) @as(f32, 0.5) else 0);
+        const elder_boost: f32 = if (mentor.stage() == .elder or mentor.role() == .elder) 0.7 else 0;
+        const youth_absorb: f32 = switch (student.stage()) {
+            .infant => 1.8,
+            .juvenile => 1.35,
+            else => 1.0,
+        };
+        const rate = 0.06 * (0.6 + mentor.skill(.care) + elder_boost) * youth_absorb;
         var taught = false;
         for (0..skill_count) |si| {
             const diff = mentor.skills[si] - student.skills[si];
