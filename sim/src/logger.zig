@@ -11,30 +11,56 @@ extern "c" fn fwrite(ptr: [*]const u8, size: usize, nmemb: usize, stream: *FILE)
 extern "c" fn fflush(stream: *FILE) c_int;
 extern "c" fn fclose(stream: *FILE) c_int;
 extern "c" fn mkdir(path: [*:0]const u8, mode: u16) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
 pub const RunLogger = struct {
     file: ?*FILE = null,
     interval: f32 = 10.0,
     next_time: f32 = 0.0,
-    path_buf: [256]u8 = @splat(0),
+    path_buf: [512]u8 = @splat(0),
     path_len: usize = 0,
 
     pub fn init(seed: u64, custom_path: ?[:0]const u8) RunLogger {
         var self = RunLogger{};
+        var f: ?*FILE = null;
         if (custom_path) |p| {
             const n = @min(p.len, self.path_buf.len - 1);
             @memcpy(self.path_buf[0..n], p[0..n]);
             self.path_buf[n] = 0;
             self.path_len = n;
+            f = fopen(@ptrCast(&self.path_buf), "w");
         } else {
+            // Try repo-local data/world_states first; when launched as a native macOS .app
+            // (cwd = /), fall back cleanly to ~/Library/Application Support/Evolving Societies/runs/.
             _ = mkdir("data", 0o755);
             _ = mkdir("data/world_states", 0o755);
-            const slice = std.fmt.bufPrint(self.path_buf[0 .. self.path_buf.len - 1], "data/world_states/run_{d}.csv", .{seed}) catch return self;
-            self.path_buf[slice.len] = 0;
-            self.path_len = slice.len;
+            if (std.fmt.bufPrint(self.path_buf[0 .. self.path_buf.len - 1], "data/world_states/run_{d}.csv", .{seed})) |slice| {
+                self.path_buf[slice.len] = 0;
+                self.path_len = slice.len;
+                f = fopen(@ptrCast(&self.path_buf), "w");
+            } else |_| {}
+
+            if (f == null) {
+                if (getenv("HOME")) |home_ptr| {
+                    const home = std.mem.span(home_ptr);
+                    var dir_buf: [512]u8 = @splat(0);
+                    if (std.fmt.bufPrint(dir_buf[0 .. dir_buf.len - 1], "{s}/Library/Application Support/Evolving Societies", .{home})) |d1| {
+                        dir_buf[d1.len] = 0;
+                        _ = mkdir(@ptrCast(&dir_buf), 0o755);
+                    } else |_| {}
+                    if (std.fmt.bufPrint(dir_buf[0 .. dir_buf.len - 1], "{s}/Library/Application Support/Evolving Societies/runs", .{home})) |d2| {
+                        dir_buf[d2.len] = 0;
+                        _ = mkdir(@ptrCast(&dir_buf), 0o755);
+                    } else |_| {}
+                    if (std.fmt.bufPrint(self.path_buf[0 .. self.path_buf.len - 1], "{s}/Library/Application Support/Evolving Societies/runs/run_{d}.csv", .{ home, seed })) |slice| {
+                        self.path_buf[slice.len] = 0;
+                        self.path_len = slice.len;
+                        f = fopen(@ptrCast(&self.path_buf), "w");
+                    } else |_| {}
+                }
+            }
         }
-        const f = fopen(@ptrCast(&self.path_buf), "w") orelse return self;
-        self.file = f;
+        self.file = f orelse return self;
         self.writeAll(
             "time,phase,scarcity,society,pop,hybrids,births,starved,old_age,killed," ++
                 "avg_gen,max_gen,avg_energy," ++

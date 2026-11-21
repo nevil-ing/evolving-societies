@@ -5,3 +5,5 @@ data/
 sim/.zig-cache/
 sim/zig-out/
 sim/zig-pkg/
+# Native macOS app bundles and installers
+dist/
