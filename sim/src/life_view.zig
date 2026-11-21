@@ -358,6 +358,20 @@ fn drawWorld(app: *App) void {
         }
     }
 
+    for (w.signals[0..w.signal_count]) |sig| {
+        const t = std.math.clamp(sig.age / sim.signal_duration, 0, 1);
+        const alpha: u8 = @intFromFloat((1 - t) * 145);
+        const col: rl.Color = switch (sig.kind) {
+            .food_found => rgb(135, 240, 155),
+            .danger_call => rgb(255, 85, 80),
+            .storm_rally => rgb(140, 200, 255),
+            .mate_call => rgb(245, 130, 230),
+        };
+        const r = 10 + sig.radius * 0.45 * t;
+        rl.DrawCircleLinesV(v2(sig.pos), r, withAlpha(col, alpha));
+        if (t > 0.15) rl.DrawCircleLinesV(v2(sig.pos), r * 0.72, withAlpha(col, alpha / 2));
+    }
+
     if (w.phase == .storm) {
         // Subtle drifting wind streaks across the world during storm waves.
         const streak_col = withAlpha(rgb(155, 195, 255), 42);
@@ -383,6 +397,9 @@ fn drawWorld(app: *App) void {
         };
         if (target) |t| {
             rl.DrawLineEx(v2(e.pos), v2(t), 1.5 / zoom, withAlpha(actionColor(e.action), 160));
+        } else if (e.heard_kind != null) {
+            rl.DrawLineEx(v2(e.pos), v2(e.heard_pos), 1.4 / zoom, withAlpha(rgb(140, 240, 175), 140));
+            rl.DrawCircleLinesV(v2(e.heard_pos), 9 / @max(zoom, 0.4), withAlpha(rgb(140, 240, 175), 190));
         } else if (e.explore_target) |goal| {
             rl.DrawLineEx(v2(e.pos), v2(goal), 1.2 / zoom, withAlpha(rgb(95, 220, 210), 110));
             rl.DrawCircleLinesV(v2(goal), 8 / @max(zoom, 0.4), withAlpha(rgb(95, 220, 210), 170));
@@ -885,7 +902,12 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     y += 15;
     const suffix: []const u8 = if (e.feeding)
         " (feeding)"
-    else if (app.world.phase == .storm and e.huddled)
+    else if (e.heard_kind) |hk| switch (hk) {
+        .food_found => " (heard food)",
+        .danger_call => " (heard danger)",
+        .storm_rally => " (heard rally)",
+        .mate_call => " (heard mate)",
+    } else if (app.world.phase == .storm and e.huddled)
         " (huddled)"
     else if (e.visible_food != null)
         " (food in sight)"

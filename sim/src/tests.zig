@@ -340,3 +340,44 @@ test "world: entities huddle during storms for shelter" {
     for (0..20) |_| try w.step(1.0 / 60.0);
     try std.testing.expect(w.entities.items[1].huddled);
 }
+
+test "world: food call recruits distant hungry kin toward shared food" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 808);
+    w.resources.clearRetainingCapacity();
+    w.patches.clearRetainingCapacity();
+    w.field.clear();
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    // Caller feeding at (0, 0); hungry kin 160 units away (beyond visual sight!).
+    const caller = &w.entities.items[0];
+    caller.society = 1;
+    caller.age = 40;
+    caller.energy = 80;
+    caller.pos = .{ .x = 0, .y = 0 };
+    caller.genome.traits[@backingInt(gen.Trait.sociability)] = 0.9;
+    caller.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    for (caller.genome.fly_gain) |*g| g.* = 1.0;
+
+    const kin = &w.entities.items[1];
+    kin.society = 1;
+    kin.age = 40;
+    kin.energy = 50;
+    kin.pos = .{ .x = 160, .y = 0 };
+    kin.heading = 0; // facing away from the food!
+
+    try w.resources.append(gpa, .{ .pos = .{ .x = 2, .y = 0 }, .food = .plant, .amount = 40, .patch = null });
+    for (0..60 * 3) |_| try w.step(1.0 / 60.0);
+
+    try std.testing.expect(w.stats[1].signals_sent > 0);
+    try std.testing.expect(w.stats[1].signals_acted > 0);
+    // Recruited kin should have turned around and moved significantly closer to the shared food.
+    try std.testing.expect(w.entities.items[1].pos.x < 120);
+}

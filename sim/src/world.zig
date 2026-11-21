@@ -178,6 +178,18 @@ pub const ContactEvent = struct {
 };
 pub const contact_duration: f32 = 0.45;
 
+pub const SignalKind = enum(u8) { food_found, danger_call, storm_rally, mate_call };
+
+pub const Signal = struct {
+    pos: Vec2,
+    target: Vec2,
+    kind: SignalKind,
+    society: u8,
+    radius: f32,
+    age: f32 = 0,
+};
+pub const signal_duration: f32 = 0.9;
+
 pub const Entity = struct {
     id: u32,
     society: u8,
@@ -216,6 +228,11 @@ pub const Entity = struct {
     explore_target: ?Vec2 = null,
     explore_timer: f32 = 0,
     distance_traveled: f32 = 0,
+    call_cooldown: f32 = 0,
+    heard_kind: ?SignalKind = null,
+    heard_pos: Vec2 = .{ .x = 0, .y = 0 },
+    heard_timer: f32 = 0,
+    last_sent: ?SignalKind = null,
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
@@ -248,7 +265,8 @@ pub const Entity = struct {
         if (delta <= 0) return;
         const idx = @backingInt(s);
         const cur = e.skills[idx];
-        e.skills[idx] = std.math.clamp(cur + delta * (1 - cur * 0.65), 0, 1);
+        // Paced for 1-2h lifespans so role specialization stays distinct across generations.
+        e.skills[idx] = std.math.clamp(cur + delta * 0.3 * (1 - cur * 0.65), 0, 1);
     }
     pub fn role(e: *const Entity) Role {
         if (!e.mature()) return .juvenile;
@@ -292,6 +310,8 @@ pub const SocietyStats = struct {
     boom_milestone: u32 = 50,
     gen_milestone: u32 = 3,
     extinct_time: ?f32 = null,
+    signals_sent: u32 = 0,
+    signals_acted: u32 = 0,
 };
 
 pub const World = struct {
@@ -319,6 +339,8 @@ pub const World = struct {
     gen_record_count: usize = 0,
     contacts: [64]ContactEvent = undefined,
     contact_count: usize = 0,
+    signals: [48]Signal = undefined,
+    signal_count: usize = 0,
     threads: usize,
     /// Skip the social network and always forage (used by tests).
     forage_only: bool = false,
@@ -361,6 +383,7 @@ pub const World = struct {
         w.gen_records = @splat(.{});
         w.gen_record_count = 0;
         w.contact_count = 0;
+        w.signal_count = 0;
         try w.populate();
     }
 
@@ -483,6 +506,7 @@ pub const World = struct {
             if (w.entities.items[i].dead == null) try w.act(i, dt);
         }
         w.ageContacts(dt);
+        w.ageSignals(dt);
         w.resolveCollisions();
 
         w.status_timer += dt;
@@ -745,10 +769,64 @@ pub const World = struct {
         const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
         if (e.energy < 35 and e.action != .flee) e.action = .forage;
 
-        // Adventure / exploration drive + visual food pursuit + storm huddling.
+        // Adventure / exploration drive + active communication + visual food pursuit + storm huddling.
         e.explore_timer = @max(0, e.explore_timer - dt);
+        e.call_cooldown = @max(0, e.call_cooldown - dt);
+        if (e.heard_timer > 0) {
+            e.heard_timer -= dt;
+            if (e.heard_timer <= 0) e.heard_kind = null;
+        }
+
+        // Act on heard signals from kin (food calls, danger warnings, storm rallies, mate calls).
+        var acted_on_signal = false;
+        if (!w.forage_only) {
+            if (e.heard_kind) |hk| {
+                const d_sig = e.pos.dist(e.heard_pos);
+                switch (hk) {
+                    .danger_call => {
+                        if (d_sig < 260) {
+                            const guard_like = e.role() == .guard or g.trait(.aggression) > 0.58;
+                            if (guard_like and e.energy > 55) {
+                                turn = steerTo(e.heading, e.pos, e.heard_pos, 4.0);
+                            } else {
+                                turn = steerTo(e.heading, e.pos, away(e.pos, e.heard_pos), 4.0);
+                            }
+                            acted_on_signal = true;
+                        } else {
+                            e.heard_kind = null;
+                        }
+                    },
+                    .storm_rally => {
+                        if (w.phase == .storm and !e.huddled and e.energy > 45 and d_sig > 22) {
+                            turn = steerTo(e.heading, e.pos, e.heard_pos, 3.8);
+                            acted_on_signal = true;
+                        } else {
+                            e.heard_kind = null;
+                        }
+                    },
+                    .food_found => {
+                        if (e.action == .forage and e.visible_food == null and e.odour < 0.22 and d_sig > 28) {
+                            turn = steerTo(e.heading, e.pos, e.heard_pos, 3.4);
+                            e.explore_target = null;
+                            acted_on_signal = true;
+                        } else if (d_sig <= 28 or e.feeding) {
+                            e.heard_kind = null;
+                        }
+                    },
+                    .mate_call => {
+                        if (e.readyToMate() and e.mate == null and d_sig > 24 and target == null) {
+                            turn = steerTo(e.heading, e.pos, e.heard_pos, 3.5);
+                            acted_on_signal = true;
+                        } else {
+                            e.heard_kind = null;
+                        }
+                    },
+                }
+            }
+        }
+
         var seeking_shelter = false;
-        if (!w.forage_only and w.phase == .storm and e.energy > 50 and !e.feeding and e.action != .fight and e.action != .flee) {
+        if (!w.forage_only and !acted_on_signal and w.phase == .storm and e.energy > 50 and !e.feeding and e.action != .fight and e.action != .flee) {
             // During storms, non-starving beings huddle with nearby kin or pull back toward home cover.
             if (!e.huddled) {
                 if (e.ally) |ai| {
@@ -763,7 +841,7 @@ pub const World = struct {
             }
         }
 
-        if (!w.forage_only and !seeking_shelter and target == null and e.action == .forage) {
+        if (!w.forage_only and !acted_on_signal and !seeking_shelter and target == null and e.action == .forage) {
             if (e.visible_food) |fpos| {
                 // Visual lock onto nearby edible food when odour is faint or entity is hungry.
                 if (e.odour < 0.14 or e.energy < 70) {
@@ -811,7 +889,7 @@ pub const World = struct {
             e.explore_target = null;
         }
 
-        if (e.explore_target == null and !seeking_shelter and e.visible_food == null) {
+        if (e.explore_target == null and !seeking_shelter and !acted_on_signal and e.visible_food == null) {
             const roam = 160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger;
             const home = soc.territory.inset(-roam);
             if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, soc.territory.center(), 2.5);
@@ -826,7 +904,7 @@ pub const World = struct {
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
         if (e.action == .flee and e.enemy != null) speed = base * 1.2;
-        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter) {
+        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or acted_on_signal) {
             speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
         }
         if (w.phase == .storm and e.huddled and !e.feeding and e.energy > 50) speed *= 0.45;
@@ -842,6 +920,7 @@ pub const World = struct {
                 if (m.feed > g.motorGene(.feed_threshold)) {
                     e.feeding = true;
                     e.explore_target = null;
+                    e.heard_kind = null;
                     speed *= 0.2;
                     const fskill = e.skill(.foraging);
                     const bite = @min(r.amount, 30 * (1 + 0.35 * fskill) * m.feed * dt);
@@ -853,7 +932,22 @@ pub const World = struct {
                     e.addSkill(.foraging, bite * 0.004);
                     e.genome.cog.learn(gained * 0.06);
                     if (w.rng().float(f32) < bite * 0.006) _ = e.genome.cog.sproutFromExperience(w.rng());
+                    // Food Call (waggle-dance style): share rich food locations with hungry kin nearby.
+                    if (!w.forage_only and r.amount > 12 and e.call_cooldown <= 0 and (g.trait(.sociability) > 0.35 or e.skill(.care) > 0.2)) {
+                        w.emitSignal(i, .food_found, r.pos);
+                    }
                 }
+            }
+        }
+
+        // Other active society calls: danger warning, storm rally, courtship call.
+        if (!w.forage_only and e.call_cooldown <= 0) {
+            if (e.enemies_near >= 2) {
+                if (e.enemy) |ei| w.emitSignal(i, .danger_call, w.entities.items[ei].pos);
+            } else if (w.phase == .storm and e.huddled and (e.role() == .elder or e.role() == .caretaker or g.trait(.sociability) > 0.5)) {
+                w.emitSignal(i, .storm_rally, e.pos);
+            } else if (e.readyToMate() and e.mate == null and e.energy > 95 and g.trait(.sociability) > 0.4) {
+                w.emitSignal(i, .mate_call, e.pos);
             }
         }
         // Physical crosswind during storms (huddled kin or home territory resist most of the wind).
@@ -908,6 +1002,7 @@ pub const World = struct {
                     e.addSkill(.combat, dt * 0.05);
                     o.addSkill(.combat, dt * 0.03);
                     o.genome.cog.learn(-dmg * 0.12);
+                    if (!w.forage_only and o.call_cooldown <= 0) w.emitSignal(oi, .danger_call, e.pos);
                     w.field.deposit(alarmChannel(o.society), o.pos.x, o.pos.y, dmg * 0.6);
                     if (o.energy <= 0 and o.dead == null) {
                         e.kills += 1;
@@ -1078,6 +1173,83 @@ pub const World = struct {
                 continue;
             }
             i += 1;
+        }
+    }
+
+    fn ageSignals(w: *World, dt: f32) void {
+        var i: usize = 0;
+        while (i < w.signal_count) {
+            w.signals[i].age += dt;
+            if (w.signals[i].age >= signal_duration) {
+                w.signal_count -= 1;
+                w.signals[i] = w.signals[w.signal_count];
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    /// Broadcast an acoustic/dance signal to nearby kin of the same society.
+    fn emitSignal(w: *World, sender_idx: usize, kind: SignalKind, target: Vec2) void {
+        const sender = &w.entities.items[sender_idx];
+        const soc = sender.society;
+        const pos = sender.pos;
+        const radius = 180 + 140 * sender.genome.trait(.sociability) + 100 * sender.skill(.care);
+        sender.call_cooldown = 4.5;
+        sender.last_sent = kind;
+        sender.energy = @max(1, sender.energy - 0.25);
+        sender.addSkill(.care, 0.02);
+        w.stats[soc].signals_sent += 1;
+
+        const sig = Signal{ .pos = pos, .target = target, .kind = kind, .society = soc, .radius = radius };
+        if (w.signal_count < w.signals.len) {
+            w.signals[w.signal_count] = sig;
+            w.signal_count += 1;
+        } else {
+            var oldest: usize = 0;
+            for (1..w.signals.len) |k| if (w.signals[k].age > w.signals[oldest].age) {
+                oldest = k;
+            };
+            w.signals[oldest] = sig;
+        }
+
+        const sender_id = sender.id;
+        for (w.entities.items) |*o| {
+            if (o.dead != null or o.id == sender_id or o.society != soc) continue;
+            if (o.pos.dist(pos) > radius) continue;
+            switch (kind) {
+                .food_found => {
+                    if (o.energy < 95 and !o.feeding and o.action != .fight and o.action != .flee and o.heard_kind != .danger_call) {
+                        o.heard_kind = .food_found;
+                        o.heard_pos = target;
+                        o.heard_timer = 10;
+                        w.stats[soc].signals_acted += 1;
+                    }
+                },
+                .danger_call => {
+                    o.heard_kind = .danger_call;
+                    o.heard_pos = target;
+                    o.heard_timer = 6;
+                    o.action_timer = 0;
+                    w.stats[soc].signals_acted += 1;
+                },
+                .storm_rally => {
+                    if (w.phase == .storm and !o.huddled and o.energy > 45) {
+                        o.heard_kind = .storm_rally;
+                        o.heard_pos = target;
+                        o.heard_timer = 8;
+                        w.stats[soc].signals_acted += 1;
+                    }
+                },
+                .mate_call => {
+                    if (o.readyToMate() and o.mate == null and o.heard_kind == null) {
+                        o.heard_kind = .mate_call;
+                        o.heard_pos = target;
+                        o.heard_timer = 7;
+                        w.stats[soc].signals_acted += 1;
+                    }
+                },
+            }
         }
     }
 

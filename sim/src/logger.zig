@@ -41,7 +41,7 @@ pub const RunLogger = struct {
                 "avg_speed,avg_efficiency,avg_aggression,avg_sociability,avg_territoriality,avg_trail_output,avg_adaptability,avg_fertility," ++
                 "avg_foraging,avg_navigation,avg_combat,avg_care," ++
                 "avg_neurons,avg_synapses,outside_home_frac,huddled_frac,active_lineages," ++
-                "foragers,scouts,guards,caretakers,elders\n",
+                "foragers,scouts,guards,caretakers,elders,signals_sent,signals_acted\n",
         );
         return self;
     }
@@ -146,7 +146,7 @@ pub const RunLogger = struct {
 
             const s2 = std.fmt.bufPrint(
                 &line,
-                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d}\n",
+                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d}\n",
                 .{
                     skills[0] / d,
                     skills[1] / d,
@@ -162,6 +162,8 @@ pub const RunLogger = struct {
                     roles[@backingInt(sim.Role.guard)],
                     roles[@backingInt(sim.Role.caretaker)],
                     roles[@backingInt(sim.Role.elder)],
+                    st.signals_sent,
+                    st.signals_acted,
                 },
             ) catch continue;
             self.writeAll(s2);

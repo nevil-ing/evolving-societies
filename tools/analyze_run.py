@@ -78,6 +78,8 @@ def main():
             f"  Spatial & storm response: outside_home={f(last, 'outside_home_frac')*100:.0f}% | "
             f"huddling calm={calm_hud*100:.0f}% vs storm={storm_hud*100:.0f}%"
         )
+        if "signals_sent" in end:
+            print(f"  Communication: signals_sent={end['signals_sent']} | kin_responses={end['signals_acted']}")
         print(
             f"  Final roles: foragers={last['foragers']} scouts={last['scouts']} "
             f"guards={last['guards']} caretakers={last['caretakers']} elders={last['elders']}\n"
