@@ -309,13 +309,14 @@ fn drawWorld(app: *App) void {
     while (gy < b.y + b.h) : (gy += 200) {
         rl.DrawLineEx(.{ .x = b.x, .y = gy }, .{ .x = b.x + b.w, .y = gy }, 1 / zoom, grid_col);
     }
-    for (sim.societies) |s| {
-        const t = s.territory;
+    for (sim.societies, 0..) |s, si| {
+        const t = w.territories[si];
         const col = societyColor(s);
-        rl.DrawRectangleRec(rect(t.x, t.y, t.w, t.h), withAlpha(col, 18));
-        rl.DrawRectangleLinesEx(rect(t.x, t.y, t.w, t.h), 2 / zoom, withAlpha(col, 90));
-        text(t.x + 10, t.y + 10, 28, withAlpha(col, 150), "{s}", .{s.name});
-        text(t.x + 10, t.y + 42, 16, withAlpha(rgb(200, 200, 210), 120), "{s}", .{s.environment});
+        const alive = w.stats[si].status != .extinct;
+        rl.DrawRectangleRec(rect(t.x, t.y, t.w, t.h), withAlpha(col, if (alive) 18 else 6));
+        rl.DrawRectangleLinesEx(rect(t.x, t.y, t.w, t.h), 2 / zoom, withAlpha(col, if (alive) 90 else 30));
+        text(t.x + 10, t.y + 10, 28, withAlpha(col, if (alive) 150 else 55), "{s}", .{s.name});
+        text(t.x + 10, t.y + 42, 16, withAlpha(rgb(200, 200, 210), if (alive) 120 else 45), "{s}", .{s.environment});
     }
 
     if (app.overlay != .off) {
@@ -337,6 +338,8 @@ fn drawWorld(app: *App) void {
         if (e.dead != null) continue;
         if (w.phase == .storm and e.huddled) {
             rl.DrawCircleV(v2(e.pos), e.radius() + 6, withAlpha(rgb(155, 195, 255), 32));
+        } else if (e.resting) {
+            rl.DrawCircleLinesV(v2(e.pos), e.radius() + 3.5, withAlpha(rgb(175, 200, 235), 90));
         }
         drawEntity(e, zoom, selected == e);
     }
@@ -495,8 +498,8 @@ fn drawHud(app: *App) !void {
     var total: u32 = 0;
     for (0..sim.society_count) |s| total += w.population(s);
     text(24, 20, 22, rgb(235, 235, 245), "{d}:{d:0>2}", .{ mins, secs });
-    text(104, 25, 13, rgb(170, 175, 190), "{s} x{d}", .{ if (app.paused) "PAUSED" else "running", speeds[app.speed] });
-    drawPhaseBadge(234, 24, w.phase);
+    text(100, 25, 13, rgb(170, 175, 190), "{s} x{d}", .{ if (app.paused) "PAUSED" else "running", speeds[app.speed] });
+    drawPhaseBadge(210, 24, w.phase, sim.phaseRemaining(w.time));
     text(24, 50, 14, rgb(200, 200, 215), "Population {d}   Max generation {d}", .{ total, w.max_generation });
     text(24, 70, 14, rgb(200, 200, 215), "Food: {s}   Overlay: {s}", .{ @tagName(w.scarcity), @tagName(app.overlay) });
 
@@ -718,14 +721,16 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
     }
 }
 
-fn drawPhaseBadge(x: f32, y: f32, p: sim.WorldPhase) void {
+fn drawPhaseBadge(x: f32, y: f32, p: sim.WorldPhase, rem: f32) void {
     const label, const bg, const fg = switch (p) {
         .calm => .{ "CALM", rgb(34, 44, 66), rgb(165, 195, 235) },
         .bloom => .{ "BLOOM", rgb(26, 74, 50), rgb(120, 240, 165) },
         .storm => .{ "STORM", rgb(56, 42, 86), rgb(190, 170, 255) },
     };
-    rl.DrawRectangleRounded(rect(x, y, 64, 17), 0.4, 4, bg);
-    text(x + 8, y + 3, 10, fg, "{s}", .{label});
+    const rmins: u32 = @intFromFloat(@max(0, rem) / 60);
+    const rsecs: u32 = @intFromFloat(@mod(@max(0, rem), 60));
+    rl.DrawRectangleRounded(rect(x, y, 92, 17), 0.4, 4, bg);
+    text(x + 7, y + 3, 10, fg, "{s} {d}:{d:0>2}", .{ label, rmins, rsecs });
 }
 
 fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
@@ -900,7 +905,9 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     y += 22;
     text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lin #{d}  age {d:.1}/{d:.0}m  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age / 60, e.lifespan / 60, e.children, e.kills });
     y += 15;
-    const suffix: []const u8 = if (e.feeding)
+    const suffix: []const u8 = if (e.resting)
+        " (resting)"
+    else if (e.feeding)
         " (feeding)"
     else if (e.heard_kind) |hk| switch (hk) {
         .food_found => " (heard food)",

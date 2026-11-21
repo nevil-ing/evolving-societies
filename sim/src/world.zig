@@ -95,6 +95,7 @@ pub const Resource = struct {
 pub const Patch = struct {
     food: FoodType,
     area: Rect,
+    owner: ?u8 = null, // tracks a society's dynamic living territory when set
     center: Vec2,
     radius: f32,
     budget: f32,
@@ -144,7 +145,14 @@ pub const WorldPhase = enum(u8) {
         };
     }
 };
-pub const cycle_length: f32 = 90;
+pub const cycle_length: f32 = 300; // 5-minute cycle: 145s calm, 90s bloom, 65s storm
+
+pub fn phaseRemaining(time: f32) f32 {
+    const t = @mod(time, cycle_length);
+    if (t < 145) return 145 - t;
+    if (t < 235) return 235 - t;
+    return cycle_length - t;
+}
 
 pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, world_bloom, world_storm };
 
@@ -196,6 +204,8 @@ pub const Entity = struct {
     pos: Vec2,
     heading: f32,
     energy: f32 = 100,
+    fatigue: f32 = 0,
+    resting: bool = false,
     age: f32 = 0,
     lifespan: f32,
     generation: u32 = 1,
@@ -333,6 +343,7 @@ pub const World = struct {
     history_timer: f32 = 0,
     status_timer: f32 = 0,
     phase: WorldPhase = .calm,
+    territories: [society_count]Rect = initTerritories(),
     events: [max_events]WorldEvent = undefined,
     event_count: usize = 0,
     gen_records: [max_gen_records]GenRecord = @splat(.{}),
@@ -379,6 +390,7 @@ pub const World = struct {
         w.history_timer = 0;
         w.status_timer = 0;
         w.phase = .calm;
+        w.territories = initTerritories();
         w.event_count = 0;
         w.gen_records = @splat(.{});
         w.gen_record_count = 0;
@@ -397,12 +409,12 @@ pub const World = struct {
 
     fn populate(w: *World) !void {
         const wild = bounds.inset(150);
-        for (societies) |s| {
-            for (0..3) |_| try w.addPatch(s.food, s.territory.inset(30));
-            try w.addPatch(.universal, s.territory.inset(30));
+        for (societies, 0..) |s, si| {
+            for (0..3) |_| try w.addPatch(s.food, s.territory.inset(30), @intCast(si));
+            try w.addPatch(.universal, s.territory.inset(30), @intCast(si));
         }
-        for (0..6) |_| try w.addPatch(.universal, wild);
-        for ([_]FoodType{ .meat, .plant, .mineral }) |t| try w.addPatch(t, wild);
+        for (0..6) |_| try w.addPatch(.universal, wild, null);
+        for ([_]FoodType{ .meat, .plant, .mineral }) |t| try w.addPatch(t, wild, null);
         for (w.patches.items, 0..) |*p, i| {
             while (p.live < patch_items) try w.spawnFood(p, @intCast(i));
         }
@@ -421,13 +433,16 @@ pub const World = struct {
     const patch_items = 8;
     const food_amount: f32 = 40;
 
-    fn addPatch(w: *World, food: FoodType, area: Rect) !void {
-        var p = Patch{ .food = food, .area = area, .center = undefined, .radius = 0, .budget = 0, .timer = 0, .live = 0 };
+    fn addPatch(w: *World, food: FoodType, area: Rect, owner: ?u8) !void {
+        var p = Patch{ .food = food, .area = area, .owner = owner, .center = undefined, .radius = 0, .budget = 0, .timer = 0, .live = 0 };
         w.relocate(&p);
         try w.patches.append(w.gpa, p);
     }
 
     fn relocate(w: *World, p: *Patch) void {
+        if (p.owner) |si| {
+            p.area = w.territories[si].inset(25);
+        }
         p.center = w.randomIn(p.area);
         p.radius = 20 + w.rng().float(f32) * 30;
         p.budget = 500 + w.rng().float(f32) * 400;
@@ -513,6 +528,7 @@ pub const World = struct {
         if (w.status_timer >= 1.0) {
             w.status_timer = 0;
             w.updateWorldPhase();
+            w.updateTerritories();
             w.updateSocietyStatuses();
         }
 
@@ -825,6 +841,7 @@ pub const World = struct {
             }
         }
 
+        const home_rect = w.territories[e.society];
         var seeking_shelter = false;
         if (!w.forage_only and !acted_on_signal and w.phase == .storm and e.energy > 50 and !e.feeding and e.action != .fight and e.action != .flee) {
             // During storms, non-starving beings huddle with nearby kin or pull back toward home cover.
@@ -834,8 +851,8 @@ pub const World = struct {
                         turn = steerTo(e.heading, e.pos, w.entities.items[ai].pos, 3.6);
                         seeking_shelter = true;
                     }
-                } else if (!soc.territory.contains(e.pos)) {
-                    turn = steerTo(e.heading, e.pos, soc.territory.center(), 3.2);
+                } else if (!home_rect.contains(e.pos)) {
+                    turn = steerTo(e.heading, e.pos, home_rect.center(), 3.2);
                     seeking_shelter = true;
                 }
             }
@@ -891,11 +908,27 @@ pub const World = struct {
 
         if (e.explore_target == null and !seeking_shelter and !acted_on_signal and e.visible_food == null) {
             const roam = 160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger;
-            const home = soc.territory.inset(-roam);
-            if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, soc.territory.center(), 2.5);
+            const home = home_rect.inset(-roam);
+            if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, home_rect.center(), 2.5);
         }
 
-        e.heading += turn * dt;
+        // Resting / sleep state: tired, non-starving beings pause to recover fatigue and save energy.
+        if (!w.forage_only) {
+            const danger_near = e.enemies_near > 0 or e.heard_kind == .danger_call or e.action == .fight or e.action == .flee;
+            if (e.resting) {
+                if (e.fatigue <= 0.12 or e.energy < 38 or danger_near) e.resting = false;
+            } else if (!danger_near and !e.feeding and e.energy > 48) {
+                const rest_thresh: f32 = if (w.phase == .storm and e.huddled) 0.45 else if (e.energy > 95 and e.since_meal < 15) 0.65 else 0.85;
+                if (e.fatigue >= rest_thresh) {
+                    e.resting = true;
+                    e.explore_target = null;
+                }
+            }
+        } else {
+            e.resting = false;
+        }
+
+        e.heading += if (e.resting) 0 else turn * dt;
 
         // Speed: DNp09 drives walking, MDN backs up, the giant fibre bolts, MN9 stops to feed.
         const base = 30 + 40 * g.trait(.speed);
@@ -908,6 +941,7 @@ pub const World = struct {
             speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
         }
         if (w.phase == .storm and e.huddled and !e.feeding and e.energy > 50) speed *= 0.45;
+        if (e.resting) speed = 0;
 
         e.feeding = false;
         if (e.touching) |ri| {
@@ -952,7 +986,7 @@ pub const World = struct {
         }
         // Physical crosswind during storms (huddled kin or home territory resist most of the wind).
         const wind_scale: f32 = if (w.phase == .storm and !w.forage_only)
-            (if (e.huddled) @as(f32, 0.25) else if (soc.territory.contains(e.pos)) @as(f32, 0.5) else 1.0)
+            (if (e.huddled or e.resting) @as(f32, 0.2) else if (home_rect.contains(e.pos)) @as(f32, 0.5) else 1.0)
         else
             0;
         const step_x = (@cos(e.heading) * speed + e.bump_vel.x + 14 * wind_scale) * dt;
@@ -961,8 +995,14 @@ pub const World = struct {
         e.pos.y += step_y;
         const moved = @sqrt(step_x * step_x + step_y * step_y);
         e.distance_traveled += moved;
-        if (!e.feeding) {
-            const nav_mult: f32 = if (soc.territory.contains(e.pos)) 1.0 else 2.0;
+        if (e.resting) {
+            e.fatigue = @max(0, e.fatigue - 0.11 * dt);
+        } else {
+            const fatigue_gain = (0.008 + 0.0005 * @abs(speed)) * (1 - 0.35 * g.trait(.efficiency));
+            e.fatigue = @min(1, e.fatigue + fatigue_gain * dt);
+        }
+        if (!e.feeding and !e.resting) {
+            const nav_mult: f32 = if (home_rect.contains(e.pos)) 1.0 else 2.0;
             e.addSkill(.navigation, moved * 0.00014 * nav_mult);
         }
         const damp = @exp(-10 * dt);
@@ -980,13 +1020,14 @@ pub const World = struct {
             w.field.deposit(trailChannel(e.society), e.pos.x, e.pos.y, g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt);
         }
 
-        // Metabolism, harsher in hard environments and during world storms; huddling cuts storm harshness.
+        // Metabolism, harsher in hard environments and during world storms; resting & huddling conserve energy.
         // Larger cognitive brains also carry a small real metabolic upkeep so only useful growth survives selection.
         const shelter_mult: f32 = if (w.phase == .storm and e.huddled) 0.55 else 1.0;
-        const harsh = (if (soc.territory.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * shelter_mult;
+        const rest_mult: f32 = if (e.resting) 0.45 else 1.0;
+        const harsh = (if (home_rect.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * shelter_mult;
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
         const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0003 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
-        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + brain_cost) * (1 + 0.5 * harsh);
+        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult;
         e.energy -= drain * dt;
         if (e.energy < 25) e.genome.cog.learn(-0.08 * dt);
 
@@ -1122,11 +1163,40 @@ pub const World = struct {
 
     fn updateWorldPhase(w: *World) void {
         const t = @mod(w.time, cycle_length);
-        const next: WorldPhase = if (t < 40) .calm else if (t < 65) .bloom else .storm;
+        const next: WorldPhase = if (t < 145) .calm else if (t < 235) .bloom else .storm;
         if (next != w.phase) {
             w.phase = next;
             if (next == .bloom) w.pushEvent(0, .world_bloom, 0);
             if (next == .storm) w.pushEvent(0, .world_storm, 0);
+        }
+    }
+
+    /// Gently shift and resize each society's living territory toward where its population actually lives.
+    fn updateTerritories(w: *World) void {
+        const safe = bounds.inset(40);
+        for (0..society_count) |si| {
+            var sx: f32 = 0;
+            var sy: f32 = 0;
+            var n: f32 = 0;
+            for (w.entities.items) |e| {
+                if (e.dead != null or e.society != si) continue;
+                sx += e.pos.x;
+                sy += e.pos.y;
+                n += 1;
+            }
+            if (n < 5) continue;
+            const cx = sx / n;
+            const cy = sy / n;
+            // Territory expands modestly when thriving and contracts when small.
+            const target_w = std.math.clamp(360 + n * 3.0, 340, 680);
+            const target_h = std.math.clamp(300 + n * 2.4, 280, 560);
+            const cur = &w.territories[si];
+            const cur_c = cur.center();
+            const nw = cur.w + (target_w - cur.w) * 0.03;
+            const nh = cur.h + (target_h - cur.h) * 0.03;
+            const nx = std.math.clamp(cur_c.x + (cx - cur_c.x) * 0.035 - nw * 0.5, safe.x, safe.x + safe.w - nw);
+            const ny = std.math.clamp(cur_c.y + (cy - cur_c.y) * 0.035 - nh * 0.5, safe.y, safe.y + safe.h - nh);
+            cur.* = .{ .x = nx, .y = ny, .w = nw, .h = nh };
         }
     }
 
@@ -1373,7 +1443,9 @@ pub const World = struct {
             return;
         }
 
-        // Rival contact: immediate re-decision + alarm pheromone into both fly circuits.
+        // Rival contact: immediate wake + re-decision + alarm pheromone into both fly circuits.
+        a.resting = false;
+        b.resting = false;
         a.action_timer = 0;
         b.action_timer = 0;
         a.addSkill(.combat, 0.02);
@@ -1445,6 +1517,12 @@ pub const World = struct {
         if (taught) mentor.addSkill(.care, 0.015);
     }
 };
+
+fn initTerritories() [society_count]Rect {
+    var out: [society_count]Rect = undefined;
+    for (societies, 0..) |s, i| out[i] = s.territory;
+    return out;
+}
 
 fn nudgeAngle(current: f32, target: f32, amount: f32) f32 {
     const diff = @mod(target - current + std.math.pi, std.math.tau) - std.math.pi;

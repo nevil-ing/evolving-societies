@@ -252,11 +252,43 @@ test "world: adventurous entities travel outside home territory and world phases
     var outside_home: usize = 0;
     for (w.entities.items) |e| {
         if (e.dead != null) continue;
-        if (!sim.societies[e.society].territory.contains(e.pos)) outside_home += 1;
+        if (!w.territories[e.society].contains(e.pos)) outside_home += 1;
     }
     try std.testing.expect(outside_home >= 10);
-    // At 70s, world should have progressed through bloom into storm phase.
+    // Advance into the 5-minute cycle's storm phase (235..300s).
+    w.time = 240;
+    for (0..65) |_| try w.step(1.0 / 60.0);
     try std.testing.expectEqual(sim.WorldPhase.storm, w.phase);
+}
+
+test "world: tired well-fed entity rests to recover fatigue and territories shift with population" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 909);
+    // Keep 6 tired, well-fed Circles shifted south-west of their initial territory.
+    while (w.entities.items.len > 6) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    const start_center = w.territories[1].center();
+    for (w.entities.items, 0..) |*e, idx| {
+        e.society = 1;
+        e.age = 50;
+        e.energy = 120;
+        e.fatigue = 0.92;
+        e.pos = .{ .x = -100 + @as(f32, @floatFromInt(idx)) * 22, .y = 300 };
+    }
+    for (0..60 * 3) |_| try w.step(1.0 / 60.0);
+
+    // Fatigue should have dropped via resting, and Circles territory should have drifted toward (-45, 300).
+    try std.testing.expect(w.entities.items[0].fatigue < 0.85);
+    const end_center = w.territories[1].center();
+    try std.testing.expect(end_center.x < start_center.x - 5);
+    try std.testing.expect(end_center.y > start_center.y + 5);
 }
 
 test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work" {
