@@ -42,7 +42,7 @@ pub const RunLogger = struct {
                 "avg_foraging,avg_navigation,avg_combat,avg_care,avg_building,avg_toolcraft," ++
                 "avg_neurons,avg_synapses,outside_home_frac,huddled_frac,active_lineages," ++
                 "foragers,scouts,guards,caretakers,builders,hunters,elders," ++
-                "signals_sent,signals_acted,cannibal_kills,tools_held,structures_built,prey_hunted\n",
+                "signals_sent,signals_acted,cannibal_kills,tools_held,structures_built,prey_hunted,avg_recurrent,avg_memories\n",
         );
         return self;
     }
@@ -78,6 +78,8 @@ pub const RunLogger = struct {
             var skills: [sim.skill_count]f32 = @splat(0);
             var neurons: f32 = 0;
             var synapses: f32 = 0;
+            var recurrent: f32 = 0;
+            var memories: f32 = 0;
             var outside: u32 = 0;
             var huddled: u32 = 0;
             var tools_held: u32 = 0;
@@ -95,6 +97,8 @@ pub const RunLogger = struct {
                 for (&skills, e.skills) |*s, v| s.* += v;
                 neurons += @floatFromInt(e.genome.cog.totalNeurons());
                 synapses += @floatFromInt(e.genome.cog.activeSynapses());
+                recurrent += @floatFromInt(e.genome.cog.recurrentSynapses());
+                memories += @floatFromInt(e.activeMemories());
                 if (!w.territories[si].contains(e.pos)) outside += 1;
                 if (e.huddled) huddled += 1;
                 if (e.tool != .none) tools_held += 1;
@@ -149,7 +153,7 @@ pub const RunLogger = struct {
 
             const s2 = std.fmt.bufPrint(
                 &line,
-                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d}\n",
+                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.2},{d:.2},{d:.3},{d:.3},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d},{d:.2},{d:.2}\n",
                 .{
                     skills[0] / d,
                     skills[1] / d,
@@ -175,6 +179,8 @@ pub const RunLogger = struct {
                     tools_held,
                     st.structures_built,
                     st.prey_hunted,
+                    recurrent / d,
+                    memories / d,
                 },
             ) catch continue;
             self.writeAll(s2);

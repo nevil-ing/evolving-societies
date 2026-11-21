@@ -74,9 +74,10 @@ def main():
             skill_cols.extend([("avg_building", "building"), ("avg_toolcraft", "toolcraft")])
         for k, label in skill_cols:
             print(f"    {label:<15} {f(first, k)*100:5.1f}% -> {f(last, k)*100:5.1f}%")
+        rec_str = f" | recurrent {f(first, 'avg_recurrent'):.1f} -> {f(last, 'avg_recurrent'):.1f} | memories {f(last, 'avg_memories'):.2f}/6" if "avg_recurrent" in last else ""
         print(
             f"    {'cog neurons':<15} {f(first, 'avg_neurons'):5.1f}  -> {f(last, 'avg_neurons'):5.1f}  "
-            f"| synapses {f(first, 'avg_synapses'):5.1f} -> {f(last, 'avg_synapses'):5.1f}"
+            f"| synapses {f(first, 'avg_synapses'):5.1f} -> {f(last, 'avg_synapses'):5.1f}{rec_str}"
         )
         print(
             f"  Spatial & storm response: outside_home={f(last, 'outside_home_frac')*100:.0f}% | "

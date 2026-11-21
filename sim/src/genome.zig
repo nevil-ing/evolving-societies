@@ -27,23 +27,27 @@ pub const MotorGene = enum(u8) {
 };
 pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 
-/// Growing cognitive network node layout (strictly feed-forward: from < to).
-///   0 .. social_inputs-1                     : sensory / state inputs
-///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable hidden neurons
-///   out_base .. max_cog_nodes-1              : action output neurons
-pub const social_inputs = 16;
+/// Growing, recurrent cognitive network node layout:
+///   0 .. social_inputs-1                          : sensory, state & memory inputs
+///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable leaky recurrent hidden neurons
+///   out_base .. max_cog_nodes-1                   : action output neurons
+pub const social_inputs = 18;
 pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
 pub const social_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
 pub const max_cog_hidden = 24;
 pub const out_base = social_inputs + max_cog_hidden;
 pub const max_cog_nodes = out_base + social_outputs;
-pub const max_cog_synapses = 224;
+pub const max_cog_synapses = 256;
 
 pub const Synapse = struct {
     from: u8,
     to: u8,
     weight: f32,
     active: bool = true,
+
+    pub fn isRecurrent(s: Synapse) bool {
+        return s.from >= social_inputs and s.from < out_base and s.to >= social_inputs and s.to < out_base and s.from >= s.to;
+    }
 };
 
 pub const CognitiveBrain = struct {
@@ -51,11 +55,20 @@ pub const CognitiveBrain = struct {
     synapse_count: u16 = 0,
     synapses: [max_cog_synapses]Synapse = undefined,
     bias: [max_cog_hidden + social_outputs]f32 = @splat(0),
-    /// Runtime activations for Hebbian plasticity & live visualization.
+    /// Online value/outcome predictor weights (for Temporal-Difference dopamine learning).
+    pred_w: [max_cog_hidden]f32 = @splat(0),
+    pred_bias: f32 = 0,
+    /// Runtime activations (hidden neurons carry leaky recurrent working memory).
     act: [max_cog_nodes]f32 = @splat(0),
-    /// Decaying pre*post eligibility traces for reward-modulated learning.
+    /// Decaying pre*post eligibility traces for TD reward-modulated plasticity.
     elig: [max_cog_synapses]f32 = @splat(0),
-    /// Synapses sprouted through lifetime experience.
+    /// Dynamic neuromodulators (runtime internal state).
+    dopamine: f32 = 0.5, // reward surprise / motivation -> boosts plasticity
+    noradrenaline: f32 = 0.2, // arousal / vigilance -> speeds thinking & adaptation
+    serotonin: f32 = 0.5, // calm / patience -> favors long-term building & care
+    last_pred: f32 = 0,
+    last_td_error: f32 = 0,
+    /// Synapses/neurons sprouted through lifetime experience.
     lifetime_rewires: u16 = 0,
 
     pub fn totalNeurons(b: *const CognitiveBrain) u32 {
@@ -70,28 +83,43 @@ pub const CognitiveBrain = struct {
         return n;
     }
 
+    pub fn recurrentSynapses(b: *const CognitiveBrain) u32 {
+        var n: u32 = 0;
+        for (b.synapses[0..b.synapse_count]) |s| {
+            if (s.active and s.isRecurrent()) n += 1;
+        }
+        return n;
+    }
+
     pub fn random(rng: Random) CognitiveBrain {
         var b = CognitiveBrain{ .hidden_count = 4 };
         for (&b.bias) |*v| v.* = rng.floatNorm(f32) * 0.25;
+        for (0..b.hidden_count) |hi| b.pred_w[hi] = rng.floatNorm(f32) * 0.2;
         // Founders lean toward foraging; curious individuals stumble onto gathering,
-        // tool-crafting, and building and lock them in through reward plasticity.
+        // tool-crafting, and building and lock them in through TD reward plasticity.
         b.bias[max_cog_hidden + @backingInt(SocialAction.forage)] += 1.35;
         b.bias[max_cog_hidden + @backingInt(SocialAction.gather)] += 0.15;
         b.bias[max_cog_hidden + @backingInt(SocialAction.craft_tool)] += 0.10;
         b.bias[max_cog_hidden + @backingInt(SocialAction.build)] += 0.10;
 
-        // Compact starter wiring: sparse input -> hidden and hidden -> output.
+        // Compact starter wiring: sparse input -> hidden, hidden -> output, and 2 starter recurrent memory loops.
         for (0..b.hidden_count) |hi| {
             const h_node: u8 = @intCast(social_inputs + hi);
             for (0..social_inputs) |ii| {
-                if (rng.float(f32) < 0.42) {
-                    _ = b.insertSynapse(@intCast(ii), h_node, rng.floatNorm(f32) * 0.6);
+                if (rng.float(f32) < 0.40) {
+                    _ = b.insertSynapse(@intCast(ii), h_node, rng.floatNorm(f32) * 0.55);
                 }
             }
             for (0..social_outputs) |oi| {
                 const o_node: u8 = @intCast(out_base + oi);
-                _ = b.insertSynapse(h_node, o_node, rng.floatNorm(f32) * 0.6);
+                _ = b.insertSynapse(h_node, o_node, rng.floatNorm(f32) * 0.55);
             }
+        }
+        // Seed initial recurrent working-memory loops between hidden neurons.
+        for (0..2) |_| {
+            const h1: u8 = @intCast(social_inputs + rng.uintLessThan(usize, b.hidden_count));
+            const h2: u8 = @intCast(social_inputs + rng.uintLessThan(usize, b.hidden_count));
+            _ = b.insertSynapse(h1, h2, rng.floatNorm(f32) * 0.45);
         }
         return b;
     }
@@ -105,10 +133,16 @@ pub const CognitiveBrain = struct {
             .hidden_count = primary.hidden_count,
             .synapse_count = 0,
             .bias = primary.bias,
+            .pred_w = primary.pred_w,
+            .pred_bias = std.math.clamp((a.pred_bias + b_parent.pred_bias) * 0.5 + mutation(rng, rate, 0.1), -2, 2),
         };
         for (&c.bias, secondary.bias) |*bv, sv| {
             const pick = if (rng.boolean()) bv.* else sv;
             bv.* = std.math.clamp(pick + mutation(rng, rate, 0.14), -4, 4);
+        }
+        for (&c.pred_w, secondary.pred_w) |*pw, sw| {
+            const pick = if (rng.boolean()) pw.* else sw;
+            pw.* = std.math.clamp(pick + mutation(rng, rate, 0.12), -2, 2);
         }
 
         for (primary.synapses[0..primary.synapse_count]) |s| {
@@ -121,9 +155,9 @@ pub const CognitiveBrain = struct {
             _ = c.insertSynapse(s.from, s.to, w);
         }
 
-        // Structural evolution: synaptogenesis, neurogenesis, and pruning.
-        if (rng.float(f32) < 0.16) _ = c.addRandomSynapse(rng);
-        if (rng.float(f32) < 0.08) _ = c.addNeuron(rng);
+        // Structural evolution: synaptogenesis (including recurrent loops), neurogenesis, and pruning.
+        if (rng.float(f32) < 0.20) _ = c.addRandomSynapse(rng);
+        if (rng.float(f32) < 0.10) _ = c.addNeuron(rng);
         if (rng.float(f32) < 0.10) c.pruneWeak();
         return c;
     }
@@ -136,7 +170,10 @@ pub const CognitiveBrain = struct {
     }
 
     fn insertSynapse(b: *CognitiveBrain, from: u8, to: u8, weight: f32) bool {
-        if (from >= to) return false;
+        const is_hidden_from = from >= social_inputs and from < out_base;
+        const is_hidden_to = to >= social_inputs and to < out_base;
+        const valid = (from < to and from < out_base and to >= social_inputs) or (is_hidden_from and is_hidden_to);
+        if (!valid) return false;
         if (b.findSynapse(from, to) != null) return false;
         if (b.synapse_count >= max_cog_synapses) return false;
         b.synapses[b.synapse_count] = .{ .from = from, .to = to, .weight = weight, .active = true };
@@ -145,8 +182,15 @@ pub const CognitiveBrain = struct {
         return true;
     }
 
-    /// Synaptogenesis: connect two previously unlinked feed-forward nodes.
+    /// Synaptogenesis: connect two previously unlinked nodes (25% chance of recurrent memory loop).
     pub fn addRandomSynapse(b: *CognitiveBrain, rng: Random) bool {
+        if (b.hidden_count > 0 and rng.float(f32) < 0.25) {
+            for (0..8) |_| {
+                const from: u8 = @intCast(social_inputs + rng.uintLessThan(usize, b.hidden_count));
+                const to: u8 = @intCast(social_inputs + rng.uintLessThan(usize, b.hidden_count));
+                if (b.insertSynapse(from, to, rng.floatNorm(f32) * 0.4)) return true;
+            }
+        }
         const src_pool = social_inputs + @as(usize, b.hidden_count);
         const dst_pool = @as(usize, b.hidden_count) + social_outputs;
         for (0..12) |_| {
@@ -201,26 +245,39 @@ pub const CognitiveBrain = struct {
         }
     }
 
-    /// Feed-forward pass; updates runtime activations and Hebbian eligibility traces.
+    /// Recurrent leaky forward pass with neuromodulation, value prediction, and eligibility traces.
     pub fn decide(b: *CognitiveBrain, in: [social_inputs]f32) SocialAction {
-        @memset(&b.act, 0);
+        var prev_h: [max_cog_hidden]f32 = @splat(0);
+        for (0..b.hidden_count) |hi| prev_h[hi] = b.act[social_inputs + hi];
+
         for (in, 0..) |x, i| b.act[i] = x;
 
         var accum: [max_cog_nodes]f32 = @splat(0);
         for (0..b.hidden_count) |hi| accum[social_inputs + hi] = b.bias[hi];
         for (0..social_outputs) |oi| accum[out_base + oi] = b.bias[max_cog_hidden + oi];
 
-        // Evaluate hidden nodes in topological order (all synapses satisfy from < to).
+        // Leaky recurrent hidden layer: blends prior working memory with new feed-forward & recurrent inputs.
+        const leak: f32 = 0.65;
         for (0..b.hidden_count) |hi| {
             const node: u8 = @intCast(social_inputs + hi);
             var sum = accum[node];
             for (b.synapses[0..b.synapse_count]) |s| {
-                if (s.active and s.to == node) sum += s.weight * b.act[s.from];
+                if (!s.active or s.to != node) continue;
+                const pre = if (s.from >= node and s.from < out_base)
+                    prev_h[s.from - social_inputs]
+                else
+                    b.act[s.from];
+                sum += s.weight * pre;
             }
-            b.act[node] = std.math.tanh(sum);
+            b.act[node] = (1 - leak) * prev_h[hi] + leak * std.math.tanh(sum);
         }
 
-        // Evaluate output logits.
+        // Online outcome/value prediction from internal hidden state.
+        var pred = b.pred_bias;
+        for (0..b.hidden_count) |hi| pred += b.pred_w[hi] * b.act[social_inputs + hi];
+        b.last_pred = std.math.tanh(pred);
+
+        // Evaluate output logits with subtle neuromodulatory tone.
         var best: usize = 0;
         var best_val: f32 = -std.math.inf(f32);
         for (0..social_outputs) |oi| {
@@ -228,6 +285,13 @@ pub const CognitiveBrain = struct {
             var sum = accum[node];
             for (b.synapses[0..b.synapse_count]) |s| {
                 if (s.active and s.to == node) sum += s.weight * b.act[s.from];
+            }
+            const act_kind: SocialAction = @fromBackingInt(@intCast(oi));
+            switch (act_kind) {
+                .build, .gather, .socialize => sum += 0.24 * (b.serotonin - 0.5),
+                .flee, .fight => sum += 0.24 * (b.noradrenaline - 0.5),
+                .craft_tool => sum += 0.18 * (b.dopamine - 0.5),
+                else => {},
             }
             b.act[node] = std.math.tanh(sum);
             if (sum > best_val) {
@@ -242,27 +306,39 @@ pub const CognitiveBrain = struct {
                 el.* = 0;
                 continue;
             }
-            el.* = 0.72 * el.* + 0.28 * b.act[s.from] * b.act[s.to];
+            const pre = if (s.isRecurrent()) prev_h[s.from - social_inputs] else b.act[s.from];
+            el.* = 0.72 * el.* + 0.28 * pre * b.act[s.to];
         }
 
         return @fromBackingInt(@intCast(best));
     }
 
-    /// Reward-modulated Hebbian plasticity: strengthen co-active paths on reward, weaken on harm.
+    /// Temporal-Difference (dopamine) modulated plasticity: learns strongest from surprising outcomes.
     pub fn learn(b: *CognitiveBrain, reward: f32) void {
         if (@abs(reward) < 1e-4) return;
-        const lr: f32 = 0.045;
+        const td = std.math.clamp(reward - 0.35 * b.last_pred, -1.5, 1.5);
+        b.last_td_error = td;
+        b.pred_bias = std.math.clamp(b.pred_bias + 0.03 * td, -2, 2);
+        for (0..b.hidden_count) |hi| {
+            b.pred_w[hi] = std.math.clamp(b.pred_w[hi] + 0.04 * td * b.act[social_inputs + hi], -2, 2);
+        }
+        const lr: f32 = 0.045 * (0.6 + 0.7 * b.dopamine + 0.4 * b.noradrenaline);
         for (b.synapses[0..b.synapse_count], b.elig[0..b.synapse_count]) |*s, el| {
             if (!s.active or @abs(el) < 1e-4) continue;
-            const delta = std.math.clamp(lr * reward * el, -0.08, 0.08);
+            const delta = std.math.clamp(lr * td * el, -0.09, 0.09);
             s.weight = std.math.clamp(s.weight + delta, -4, 4);
         }
+        b.dopamine = std.math.clamp(b.dopamine + 0.18 * (std.math.clamp(0.5 + 0.45 * td, 0.05, 1.0) - b.dopamine), 0.05, 1.0);
     }
 
-    /// Experience-driven developmental synaptogenesis during a creature's lifetime.
+    /// Experience-driven developmental rewiring: sprouts synapses and occasionally new neurons in life!
     pub fn sproutFromExperience(b: *CognitiveBrain, rng: Random) bool {
-        if (b.lifetime_rewires >= 4) return false;
-        if (b.addRandomSynapse(rng)) {
+        if (b.lifetime_rewires >= 8) return false;
+        const grew = if (b.lifetime_rewires >= 3 and rng.float(f32) < 0.25)
+            b.addNeuron(rng) or b.addRandomSynapse(rng)
+        else
+            b.addRandomSynapse(rng);
+        if (grew) {
             b.lifetime_rewires += 1;
             return true;
         }

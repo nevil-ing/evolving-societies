@@ -177,6 +177,22 @@ pub const Prey = struct {
     stagger_timer: f32 = 0,
 };
 
+pub const MemoryKind = enum(u8) { food, material, shelter, danger, prey };
+
+pub const Memory = struct {
+    kind: MemoryKind = .food,
+    pos: Vec2 = .{ .x = 0, .y = 0 },
+    confidence: f32 = 0, // 0 = empty, decays slowly over minutes
+    age: f32 = 0,
+};
+pub const max_memories = 6;
+
+pub const SocialBond = struct {
+    other_id: u32 = 0,
+    trust: f32 = 0, // -1 (distrusted attacker) .. +1 (trusted ally)
+};
+pub const max_bonds = 4;
+
 pub const SocietyStatus = enum(u8) { thriving, stable, struggling, endangered, extinct };
 
 pub const WorldPhase = enum(u8) {
@@ -302,6 +318,9 @@ pub const Entity = struct {
     tool: ToolKind = .none,
     tool_durability: f32 = 0,
     craft_cooldown: f32 = 0,
+    memories: [max_memories]Memory = @splat(.{}),
+    bonds: [max_bonds]SocialBond = @splat(.{}),
+    recalling: ?MemoryKind = null,
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
@@ -368,6 +387,77 @@ pub const Entity = struct {
             .building => .builder,
             .toolcraft => .hunter,
         };
+    }
+    pub fn remember(e: *Entity, kind: MemoryKind, pos: Vec2, strength: f32) void {
+        var weakest: usize = 0;
+        var weak_conf: f32 = 2.0;
+        for (&e.memories, 0..) |*m, idx| {
+            if (m.confidence > 0 and m.kind == kind and m.pos.dist(pos) < 110) {
+                m.pos.x = m.pos.x * 0.65 + pos.x * 0.35;
+                m.pos.y = m.pos.y * 0.65 + pos.y * 0.35;
+                m.confidence = @min(1.0, @max(m.confidence, strength) + 0.15);
+                m.age = 0;
+                return;
+            }
+            if (m.confidence < weak_conf) {
+                weak_conf = m.confidence;
+                weakest = idx;
+            }
+        }
+        if (strength >= weak_conf or weak_conf <= 0.01) {
+            e.memories[weakest] = .{ .kind = kind, .pos = pos, .confidence = std.math.clamp(strength, 0, 1), .age = 0 };
+        }
+    }
+    pub fn recall(e: *const Entity, kind: MemoryKind, min_conf: f32) ?usize {
+        var best: ?usize = null;
+        var best_score: f32 = min_conf;
+        for (e.memories, 0..) |m, idx| {
+            if (m.kind == kind and m.confidence > best_score) {
+                best_score = m.confidence;
+                best = idx;
+            }
+        }
+        return best;
+    }
+    pub fn activeMemories(e: *const Entity) u32 {
+        var n: u32 = 0;
+        for (e.memories) |m| if (m.confidence > 0.1) {
+            n += 1;
+        };
+        return n;
+    }
+    pub fn adjustTrust(e: *Entity, other_id: u32, delta: f32) void {
+        if (other_id == 0 or other_id == e.id) return;
+        var slot: usize = 0;
+        var weakest: f32 = 2.0;
+        for (&e.bonds, 0..) |*b, idx| {
+            if (b.other_id == other_id) {
+                b.trust = std.math.clamp(b.trust + delta, -1, 1);
+                return;
+            }
+            if (b.other_id == 0) {
+                b.* = .{ .other_id = other_id, .trust = std.math.clamp(delta, -1, 1) };
+                return;
+            }
+            if (@abs(b.trust) < weakest) {
+                weakest = @abs(b.trust);
+                slot = idx;
+            }
+        }
+        if (@abs(delta) >= weakest) {
+            e.bonds[slot] = .{ .other_id = other_id, .trust = std.math.clamp(delta, -1, 1) };
+        }
+    }
+    pub fn trustOf(e: *const Entity, other_id: u32) f32 {
+        for (e.bonds) |b| if (b.other_id == other_id) return b.trust;
+        return 0;
+    }
+    pub fn bondCount(e: *const Entity) u32 {
+        var n: u32 = 0;
+        for (e.bonds) |b| if (b.other_id != 0 and @abs(b.trust) > 0.1) {
+            n += 1;
+        };
+        return n;
     }
 };
 
@@ -1203,10 +1293,25 @@ pub const World = struct {
         e.bump_cooldown = @max(0, e.bump_cooldown - dt);
         e.craft_cooldown = @max(0, e.craft_cooldown - dt);
 
-        // Social decision (16 sensory/state inputs -> 8 actions including gather, craft_tool, build).
+        // Age episodic memories & update internal neuromodulators (arousal, calm, motivation).
+        if (!w.forage_only) {
+            for (&e.memories) |*mem| {
+                if (mem.confidence <= 0) continue;
+                mem.age += dt;
+                mem.confidence = @max(0, mem.confidence - 0.0025 * dt);
+            }
+            const threat_arousal: f32 = if (e.enemies_near > 0 or e.alarm > 0.2 or e.heard_kind == .danger_call) 0.9 else if (w.phase == .storm and !e.in_shelter) 0.55 else 0.15;
+            g.cog.noradrenaline = std.math.clamp(g.cog.noradrenaline + (threat_arousal - g.cog.noradrenaline) * @min(1, dt * 1.4), 0.05, 1.0);
+            const calm_target: f32 = if (e.energy > 80 and (e.in_shelter or e.allies_near > 0) and e.enemies_near == 0) 0.85 else if (e.energy < 40 or e.enemies_near > 0) 0.15 else 0.5;
+            g.cog.serotonin = std.math.clamp(g.cog.serotonin + (calm_target - g.cog.serotonin) * @min(1, dt * 0.6), 0.05, 1.0);
+            g.cog.dopamine = std.math.clamp(g.cog.dopamine + (0.5 - g.cog.dopamine) * @min(1, dt * 0.25), 0.05, 1.0);
+        }
+
+        // Social decision (18 sensory/memory inputs -> recurrent leaky hidden state -> 8 actions).
+        // Thinking tempo adapts dynamically: alert/aroused entities deliberate faster in crisis!
         e.action_timer -= dt;
         if (e.action_timer <= 0 and !w.forage_only) {
-            e.action_timer = 0.5;
+            e.action_timer = 0.55 - 0.30 * g.cog.noradrenaline;
             const env_sig: f32 = if (w.phase == .storm and !e.in_shelter)
                 1.0
             else if (e.in_shelter)
@@ -1215,6 +1320,23 @@ pub const World = struct {
                 0.7
             else
                 0;
+            const mem_pos_conf: f32 = blk: {
+                var best: f32 = 0;
+                for (e.memories) |mem| {
+                    if ((mem.kind == .food or mem.kind == .material or mem.kind == .shelter) and mem.confidence > best) {
+                        best = mem.confidence;
+                    }
+                }
+                break :blk best;
+            };
+            var mem_social_cue: f32 = 0;
+            if (e.ally) |ai| mem_social_cue += e.trustOf(w.entities.items[ai].id);
+            if (e.enemy) |ei| mem_social_cue += e.trustOf(w.entities.items[ei].id);
+            if (e.recall(.danger, 0.3)) |di| {
+                if (e.pos.dist(e.memories[di].pos) < 110) mem_social_cue -= e.memories[di].confidence;
+            }
+            mem_social_cue = std.math.clamp(mem_social_cue, -1, 1);
+
             e.action = g.decide(.{
                 e.energy / max_energy,
                 @min(e.since_meal / 30, 1),
@@ -1232,6 +1354,8 @@ pub const World = struct {
                 if (e.tool != .none) 1 else 0,
                 if (e.near_material != null) 1 else 0,
                 env_sig,
+                mem_pos_conf,
+                mem_social_cue,
             });
         }
 
@@ -1365,7 +1489,75 @@ pub const World = struct {
             }
         }
 
-        if (!w.forage_only and !acted_on_signal and !seeking_shelter and !seeking_cache and target == null and e.action == .forage) {
+        // Episodic Spatial Memory Recall & Belief Updating: navigate by mental map when nothing is locally visible.
+        e.recalling = null;
+        if (!w.forage_only and !acted_on_signal and !seeking_shelter and !seeking_cache and target == null) {
+            // 1. Storm shelter recall (even from far across the world).
+            if (w.phase == .storm and !e.in_shelter and e.energy > 48 and e.action != .fight and e.action != .flee) {
+                if (e.recall(.shelter, 0.25)) |mi| {
+                    const mpos = e.memories[mi].pos;
+                    if (e.pos.dist(mpos) > 28) {
+                        turn = steerTo(e.heading, e.pos, mpos, 3.9);
+                        e.recalling = .shelter;
+                        seeking_shelter = true;
+                    } else if (!e.in_shelter) {
+                        // Shelter collapsed or gone: update belief!
+                        e.memories[mi].confidence = 0;
+                    }
+                }
+            }
+            // 2. Remembered danger zone avoidance (for non-aggressive or injured individuals).
+            if (e.recalling == null and (g.trait(.aggression) < 0.58 or e.energy < 65) and e.action != .fight) {
+                if (e.recall(.danger, 0.30)) |di| {
+                    if (e.pos.dist(e.memories[di].pos) < 95) {
+                        turn = steerTo(e.heading, e.pos, away(e.pos, e.memories[di].pos), 3.8);
+                        e.recalling = .danger;
+                        g.cog.noradrenaline = @min(1, g.cog.noradrenaline + 0.15 * dt);
+                    }
+                }
+            }
+            // 3. Food patch memory recall when hungry with no local food/scent.
+            if (e.recalling == null and e.action == .forage and e.visible_food == null and e.odour < 0.14 and e.energy < 72) {
+                if (e.recall(.food, 0.20)) |fi| {
+                    const mpos = e.memories[fi].pos;
+                    if (e.pos.dist(mpos) < 26) {
+                        // Arrived and patch is gone -> belief update + mild negative TD surprise!
+                        e.memories[fi].confidence = 0;
+                        g.cog.learn(-0.18);
+                    } else {
+                        turn = steerTo(e.heading, e.pos, mpos, 3.8);
+                        e.explore_target = null;
+                        e.recalling = .food;
+                    }
+                }
+            }
+            // 4. Quarry / material recall when wanting to gather, craft, or build.
+            if (e.recalling == null and e.carrying == .none and e.near_material == null and (e.action == .gather or e.action == .craft_tool or e.action == .build)) {
+                if (e.recall(.material, 0.20)) |qi| {
+                    const mpos = e.memories[qi].pos;
+                    if (e.pos.dist(mpos) < 28) {
+                        e.memories[qi].confidence = 0;
+                    } else {
+                        turn = steerTo(e.heading, e.pos, mpos, 3.7);
+                        e.recalling = .material;
+                    }
+                }
+            }
+            // 5. Hunting ground recall for spear-wielding hunters.
+            if (e.recalling == null and e.tool == .spear and e.near_prey == null and e.energy > 45 and e.energy < 105 and e.action != .flee) {
+                if (e.recall(.prey, 0.25)) |pi| {
+                    const mpos = e.memories[pi].pos;
+                    if (e.pos.dist(mpos) < 35) {
+                        e.memories[pi].confidence = 0;
+                    } else {
+                        turn = steerTo(e.heading, e.pos, mpos, 3.6);
+                        e.recalling = .prey;
+                    }
+                }
+            }
+        }
+
+        if (!w.forage_only and !acted_on_signal and !seeking_shelter and !seeking_cache and e.recalling == null and target == null and e.action == .forage) {
             if (e.visible_food) |fpos| {
                 // Visual lock onto nearby edible food when odour is faint or entity is hungry.
                 if (e.odour < 0.14 or e.energy < 70) {
@@ -1413,7 +1605,7 @@ pub const World = struct {
             e.explore_target = null;
         }
 
-        if (e.explore_target == null and !seeking_shelter and !seeking_cache and !acted_on_signal and e.visible_food == null and target == null) {
+        if (e.explore_target == null and !seeking_shelter and !seeking_cache and e.recalling == null and !acted_on_signal and e.visible_food == null and target == null) {
             const roam = 160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger;
             const home = home_rect.inset(-roam);
             if (!home.contains(e.pos)) turn = steerTo(e.heading, e.pos, home_rect.center(), 2.5);
@@ -1445,11 +1637,15 @@ pub const World = struct {
         if (e.escape_timer > 0) speed = base * 2.5;
         if (e.action == .flee and e.enemy != null) speed = base * 1.2;
         if (starving_hunt or hunting_prey) speed = @max(speed, base * 1.12);
-        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or seeking_cache or acted_on_signal or target != null) {
+        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or seeking_cache or e.recalling != null or acted_on_signal or target != null) {
             speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
         }
         if (e.carrying != .none) speed *= 0.88;
-        if (w.phase == .storm and (e.huddled or e.in_shelter) and !e.feeding and e.energy > 50) speed *= 0.45;
+        if (w.phase == .storm and e.in_shelter and !e.feeding and e.energy > 50 and e.action != .fight and e.action != .flee) {
+            speed *= 0.12;
+        } else if (w.phase == .storm and e.huddled and !e.feeding and e.energy > 50) {
+            speed *= 0.45;
+        }
         if (e.resting) speed = 0;
 
         e.feeding = false;
@@ -1479,6 +1675,7 @@ pub const World = struct {
                         if (e.tool_durability <= 0) e.tool = .none;
                     }
                     e.genome.cog.learn(gained * 0.06);
+                    if (!w.forage_only and r.amount > 6) e.remember(.food, r.pos, 0.75);
                     if (w.rng().float(f32) < bite * 0.006) _ = e.genome.cog.sproutFromExperience(w.rng());
                     // Food Call (waggle-dance style): share rich food locations with hungry kin nearby.
                     if (!w.forage_only and r.amount > 12 and e.call_cooldown <= 0 and (g.trait(.sociability) > 0.35 or e.skill(.care) > 0.2)) {
@@ -1516,7 +1713,10 @@ pub const World = struct {
             const fatigue_gain = (0.008 + 0.0005 * @abs(speed)) * (1 - 0.35 * g.trait(.efficiency));
             e.fatigue = @min(1, e.fatigue + fatigue_gain * dt);
         }
-        if (e.in_shelter and !w.forage_only) e.addSkill(.building, 0.002 * dt);
+        if (e.in_shelter and !w.forage_only) {
+            e.addSkill(.building, 0.002 * dt);
+            e.remember(.shelter, e.pos, 0.8);
+        }
         if (!e.feeding and !e.resting) {
             const nav_mult: f32 = if (home_rect.contains(e.pos)) 1.0 else 2.0;
             e.addSkill(.navigation, moved * 0.00014 * nav_mult);
@@ -1557,9 +1757,14 @@ pub const World = struct {
                     if (mat.amount > 0 and mat.pos.dist(e.pos) < e.radius() + 14) {
                         mat.amount -= 15;
                         e.carrying = if (mat.kind == .wood) .wood else .stone;
+                        if (mat.amount > 0) e.remember(.material, mat.pos, 0.72);
                         e.genome.cog.learn(0.25);
                     }
                 }
+            }
+            if (e.near_prey) |pi| {
+                const pr = w.prey.items[pi];
+                if (pr.hp > 0) e.remember(.prey, pr.pos, 0.55);
             }
 
             // 2. Craft a tool from carried material (stone -> Spear, wood -> Basket).
@@ -1686,6 +1891,11 @@ pub const World = struct {
                     }
                     o.addSkill(.combat, dt * 0.03);
                     o.genome.cog.learn(-dmg * 0.12);
+                    if (!w.forage_only) {
+                        o.remember(.danger, e.pos, 0.90);
+                        o.adjustTrust(e.id, -0.55 * dt);
+                        o.genome.cog.noradrenaline = @min(1, o.genome.cog.noradrenaline + 0.5 * dt);
+                    }
                     if (!w.forage_only and o.call_cooldown <= 0) w.emitSignal(oi, .danger_call, e.pos);
                     w.field.deposit(alarmChannel(o.society), o.pos.x, o.pos.y, dmg * 0.6);
                     if (o.energy <= 0 and o.dead == null) {
@@ -1741,6 +1951,7 @@ pub const World = struct {
                 e.genome.cog.learn(0.85);
                 _ = e.genome.cog.sproutFromExperience(w.rng());
                 if (!was_complete and st.complete()) {
+                    e.remember(.shelter, st.pos, 0.95);
                     const stats = &w.stats[e.society];
                     stats.structures_built += 1;
                     if (!stats.discovered_building) {
@@ -1834,6 +2045,16 @@ pub const World = struct {
             const jitter = 1 + 0.08 * w.rng().floatNorm(f32);
             cs.* = std.math.clamp(0.5 * (sa + sb) * transfer * jitter, 0, 1);
         }
+        // Generational landmark knowledge: child inherits parents' strongest shelter or food memory.
+        for ([_]Entity{ a, b }) |parent| {
+            if (parent.recall(.shelter, 0.35)) |si| {
+                child.remember(.shelter, parent.memories[si].pos, parent.memories[si].confidence * 0.6);
+            } else if (parent.recall(.food, 0.35)) |fi| {
+                child.remember(.food, parent.memories[fi].pos, parent.memories[fi].confidence * 0.55);
+            }
+        }
+        child.adjustTrust(a.id, 0.6);
+        child.adjustTrust(b.id, 0.6);
 
         w.max_generation = @max(w.max_generation, child.generation);
         const st = &w.stats[society];
@@ -1858,6 +2079,7 @@ pub const World = struct {
             p.children += 1;
             p.addSkill(.care, 0.05);
             p.genome.cog.learn(0.8);
+            p.adjustTrust(if (pi == ai) b.id else a.id, 0.4);
         }
     }
 
@@ -2200,9 +2422,13 @@ pub const World = struct {
             b.bump_vel.x += tx * b_side * 8 + nx * 4;
             b.bump_vel.y += ty * b_side * 8 + ny * 4;
 
-            // Mentorship: experienced adults/elders pass a bit of their learned skills to less-skilled kin.
+            // Mentorship & storytelling: experienced kin pass down learned skills and spatial memories!
             mentorKin(a, b);
             mentorKin(b, a);
+            if (!w.forage_only) {
+                shareMemory(a, b);
+                shareMemory(b, a);
+            }
 
             if (a.readyToMate() and b.readyToMate()) {
                 w.addContact(mid, .courtship, a.society);
@@ -2269,7 +2495,9 @@ pub const World = struct {
     }
 
     fn tryShareFood(w: *World, donor: *Entity, receiver: *Entity, mid: Vec2) bool {
-        if (donor.energy > 105 and receiver.energy < 75 and donor.genome.trait(.sociability) > 0.45) {
+        const trust = donor.trustOf(receiver.id);
+        const min_donor: f32 = if (trust > 0.3) 90 else 105;
+        if (donor.energy > min_donor and receiver.energy < 75 and (donor.genome.trait(.sociability) > 0.45 or trust > 0.35)) {
             const gift: f32 = 6 + 4 * donor.skill(.care);
             donor.energy -= gift;
             receiver.energy = @min(max_energy, receiver.energy + gift);
@@ -2277,11 +2505,23 @@ pub const World = struct {
             donor.addSkill(.care, 0.06);
             donor.genome.cog.learn(0.35);
             receiver.genome.cog.learn(0.4);
+            donor.adjustTrust(receiver.id, 0.30);
+            receiver.adjustTrust(donor.id, 0.45);
             w.field.deposit(trailChannel(donor.society), mid.x, mid.y, 1.0);
             w.addContact(mid, .share_food, donor.society);
             return true;
         }
         return false;
+    }
+
+    fn shareMemory(teller: *const Entity, listener: *Entity) void {
+        // Share strongest food, shelter, or recent danger memory with kin.
+        for ([_]MemoryKind{ .food, .shelter, .danger }) |kind| {
+            if (teller.recall(kind, 0.48)) |mi| {
+                const mem = teller.memories[mi];
+                listener.remember(kind, mem.pos, mem.confidence * 0.72);
+            }
+        }
     }
 
     fn mentorKin(mentor: *Entity, student: *Entity) void {
@@ -2295,7 +2535,11 @@ pub const World = struct {
                 taught = true;
             }
         }
-        if (taught) mentor.addSkill(.care, 0.006);
+        if (taught) {
+            mentor.addSkill(.care, 0.006);
+            mentor.adjustTrust(student.id, 0.15);
+            student.adjustTrust(mentor.id, 0.22);
+        }
     }
 };
 

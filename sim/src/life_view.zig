@@ -536,6 +536,29 @@ fn drawWorld(app: *App) void {
     }
 
     if (selected) |e| {
+        // Draw the selected entity's live Mental Map (episodic spatial memories).
+        for (e.memories) |mem| {
+            if (mem.confidence <= 0.12) continue;
+            const mcol: rl.Color = switch (mem.kind) {
+                .food => rgb(105, 235, 145),
+                .material => rgb(195, 155, 95),
+                .shelter => rgb(125, 200, 255),
+                .danger => rgb(255, 85, 85),
+                .prey => rgb(235, 175, 85),
+            };
+            const tag: [:0]const u8 = switch (mem.kind) {
+                .food => "F",
+                .material => "M",
+                .shelter => "S",
+                .danger => "!",
+                .prey => "P",
+            };
+            const ma: u8 = @intFromFloat(std.math.clamp(mem.confidence, 0.2, 1.0) * 140);
+            rl.DrawLineEx(v2(e.pos), v2(mem.pos), 1.0 / @max(zoom, 0.5), withAlpha(mcol, ma / 2));
+            rl.DrawCircleLinesV(v2(mem.pos), 10 / @max(zoom, 0.5), withAlpha(mcol, ma));
+            const msz: c_int = @intFromFloat(@max(10, 12 / @max(zoom, 0.5)));
+            text(mem.pos.x - 3 / @max(zoom, 0.5), mem.pos.y - 6 / @max(zoom, 0.5), msz, withAlpha(mcol, @intCast(@min(255, @as(u16, ma) + 70))), "{s}", .{tag});
+        }
         const ant = [2]f32{ e.heading - 0.5, e.heading + 0.5 };
         for (ant) |a| rl.DrawLineEx(v2(e.pos), .{ .x = e.pos.x + 12 * @cos(a), .y = e.pos.y + 12 * @sin(a) }, 1.5 / zoom, rgb(230, 230, 240));
         rl.DrawCircleLinesV(v2(e.pos), 16, rgb(255, 230, 80));
@@ -1537,7 +1560,7 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     const s = sim.societies[e.society];
     const x: f32 = 12;
     var y: f32 = 114;
-    const h: f32 = if (app.show_brain) 694 else 534;
+    const h: f32 = if (app.show_brain) 714 else 534;
     panel(x, y, 300, h);
     y += 8;
     text(x + 12, y, 17, societyColor(s), "{s} #{d}", .{ s.name, e.id });
@@ -1549,7 +1572,13 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     y += 15;
     const suffix: []const u8 = if (e.cannibal_target and e.action == .fight)
         " (hunting kin)"
-    else if (e.in_shelter)
+    else if (e.recalling) |rk| switch (rk) {
+        .food => " (recalling food)",
+        .material => " (recalling quarry)",
+        .shelter => " (recalling shelter)",
+        .danger => " (avoiding danger)",
+        .prey => " (tracking prey)",
+    } else if (e.in_shelter)
         " (in shelter)"
     else if (e.resting)
         " (resting)"
@@ -1617,8 +1646,12 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     if (app.show_brain) {
         y += 5;
         const cog = &e.genome.cog;
-        text(x + 12, y, 11, rgb(235, 235, 245), "Cognitive brain ({d} neurons, {d} synapses, +{d} grown)", .{
-            cog.totalNeurons(), cog.activeSynapses(), cog.lifetime_rewires,
+        text(x + 12, y, 11, rgb(235, 235, 245), "Mind ({d}n, {d}s, {d} rec, +{d} grown)", .{
+            cog.totalNeurons(), cog.activeSynapses(), cog.recurrentSynapses(), cog.lifetime_rewires,
+        });
+        y += 14;
+        text(x + 12, y, 10, rgb(165, 195, 220), "DA {d:.2}  NA {d:.2}  5HT {d:.2}   mem {d}/6  bonds {d}", .{
+            cog.dopamine, cog.noradrenaline, cog.serotonin, e.activeMemories(), e.bondCount(),
         });
         y += 14;
         drawCognitiveGraph(cog, x + 12, y, 276, 54);
@@ -1661,13 +1694,22 @@ fn drawCognitiveGraph(cog: *const gen.CognitiveBrain, x: f32, y: f32, w: f32, h:
         pos[gen.out_base + oi] = .{ .x = x + w - 10, .y = y + 5 + t * (h - 10) };
     }
 
-    // Synapses: green = excitatory, red = inhibitory, brightness = strength.
+    // Synapses: green = excitatory, red = inhibitory, violet = recurrent working-memory loop.
     for (cog.synapses[0..cog.synapse_count]) |s| {
         if (!s.active) continue;
         const mag = std.math.clamp(@abs(s.weight) / 2.0, 0.15, 1.0);
-        const alpha: u8 = @intFromFloat(mag * 145);
-        const col = if (s.weight >= 0) withAlpha(rgb(90, 225, 150), alpha) else withAlpha(rgb(245, 95, 95), alpha);
-        rl.DrawLineEx(pos[s.from], pos[s.to], 0.9 + 0.6 * mag, col);
+        const alpha: u8 = @intFromFloat(mag * 150);
+        if (s.isRecurrent()) {
+            const rcol = withAlpha(rgb(190, 125, 255), @min(220, @as(u16, alpha) + 40));
+            if (s.from == s.to) {
+                rl.DrawCircleLinesV(.{ .x = pos[s.from].x, .y = pos[s.from].y - 3.5 }, 4.2, rcol);
+            } else {
+                rl.DrawLineEx(pos[s.from], pos[s.to], 1.2 + 0.6 * mag, rcol);
+            }
+        } else {
+            const col = if (s.weight >= 0) withAlpha(rgb(90, 225, 150), alpha) else withAlpha(rgb(245, 95, 95), alpha);
+            rl.DrawLineEx(pos[s.from], pos[s.to], 0.9 + 0.6 * mag, col);
+        }
     }
 
     // Nodes: brightness reflects live activation.

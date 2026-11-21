@@ -305,18 +305,25 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expect(brain.sproutFromExperience(rng));
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
-    // Run a decision then apply positive reward: weights on active paths should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0 });
+    // Run a decision then apply positive reward: weights, predictor, and dopamine should adapt.
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2 });
+    // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    var hidden_mag: f32 = 0;
+    for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
+    try std.testing.expect(hidden_mag > 1e-3);
     var before: f32 = 0;
     for (brain.synapses[0..brain.synapse_count]) |s| if (s.active) {
         before += @abs(s.weight);
     };
+    const da_before = brain.dopamine;
     brain.learn(1.0);
     var after: f32 = 0;
     for (brain.synapses[0..brain.synapse_count]) |s| if (s.active) {
         after += @abs(s.weight);
     };
     try std.testing.expect(@abs(after - before) > 1e-4);
+    try std.testing.expect(brain.dopamine > da_before);
 }
 
 test "world: starving entity spots nearby food visually and eats instead of idling" {
@@ -595,4 +602,59 @@ test "world: stigmergic shelters protect during storms and food caches feed star
     try std.testing.expect(w.stats[2].discovered_building);
     try std.testing.expect(w.entities.items[0].in_shelter);
     try std.testing.expect(w.entities.items[1].food_eaten > 10.0);
+}
+
+test "world: episodic memory guides navigation, updates stale beliefs, and shares across kin" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 2029);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    // Entity 0 is hungry at (0,0) facing away, with a memory of food at (130,0) and a shelter at (-200,0).
+    const scout = &w.entities.items[0];
+    scout.society = 1;
+    scout.age = 50;
+    scout.energy = 55;
+    scout.pos = .{ .x = 0, .y = 0 };
+    scout.heading = std.math.pi;
+    scout.genome.traits[@backingInt(gen.Trait.speed)] = 0.9;
+    scout.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.forage)] = 4.0;
+    scout.remember(.food, .{ .x = 130, .y = 0 }, 0.85);
+    scout.remember(.shelter, .{ .x = -200, .y = 0 }, 0.9);
+
+    // Entity 1 bumps right next to scout so scout shares its memories on kin contact.
+    const listener = &w.entities.items[1];
+    listener.society = 1;
+    listener.age = 50;
+    listener.energy = 90;
+    listener.pos = .{ .x = 4, .y = 0 };
+
+    // Tick 1: on kin touch, listener learns scout's shelter memory.
+    try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items[1].recall(.shelter, 0.2) != null);
+    // Move listener out of the way so scout's belief update isn't re-shared mid-flight.
+    w.entities.items[1].pos = .{ .x = -500, .y = -500 };
+
+    // Scout navigates by memory to (130, 0) and clears the stale food belief upon finding nothing there.
+    var reached = false;
+    var cleared = false;
+    for (0..60 * 5) |_| {
+        try w.step(1.0 / 60.0);
+        if (w.entities.items[0].pos.x > 95) reached = true;
+        if (reached and w.entities.items[0].recall(.food, 0.1) == null) {
+            cleared = true;
+            break;
+        }
+    }
+    try std.testing.expect(reached);
+    try std.testing.expect(cleared);
 }
