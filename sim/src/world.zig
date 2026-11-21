@@ -69,17 +69,21 @@ pub fn alarmChannel(s: usize) usize {
 pub const channel_count = food_type_count + 2 * society_count;
 
 pub const Scarcity = enum {
+    feast,
     abundant,
     normal,
     scarce,
     famine,
+    none,
 
     pub fn regrowth(s: Scarcity) f32 {
         return switch (s) {
+            .feast => 5.0,
             .abundant => 2.0,
             .normal => 1.0,
             .scarce => 0.5,
             .famine => 0.2,
+            .none => 0.0,
         };
     }
 };
@@ -89,6 +93,7 @@ pub const Resource = struct {
     food: FoodType,
     amount: f32,
     patch: ?u16,
+    corpse: bool = false,
 };
 
 /// A cluster of food that regrows until its budget runs out, then moves.
@@ -154,7 +159,7 @@ pub fn phaseRemaining(time: f32) f32 {
     return cycle_length - t;
 }
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, world_bloom, world_storm };
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, world_bloom, world_storm };
 
 pub const WorldEvent = struct {
     time: f32,
@@ -217,6 +222,7 @@ pub const Entity = struct {
     since_meal: f32 = 30,
     food_eaten: f32 = 0,
     kills: u32 = 0,
+    cannibal_kills: u32 = 0,
     skills: [skill_count]f32 = @splat(0),
 
     genome: gen.Genome,
@@ -248,6 +254,7 @@ pub const Entity = struct {
     touching: ?u32 = null,
     visible_food: ?Vec2 = null,
     huddled: bool = false,
+    cannibal_target: bool = false,
     enemy: ?u32 = null,
     enemy_dist: f32 = 0,
     enemies_near: u32 = 0,
@@ -323,6 +330,8 @@ pub const SocietyStats = struct {
     extinct_time: ?f32 = null,
     signals_sent: u32 = 0,
     signals_acted: u32 = 0,
+    cannibal_kills: u32 = 0,
+    had_cannibalism: bool = false,
 };
 
 pub const World = struct {
@@ -345,6 +354,7 @@ pub const World = struct {
     status_timer: f32 = 0,
     clash_cooldown: f32 = 0,
     phase: WorldPhase = .calm,
+    phase_offset: f32 = 0,
     territories: [society_count]Rect = initTerritories(),
     events: [max_events]WorldEvent = undefined,
     event_count: usize = 0,
@@ -393,6 +403,7 @@ pub const World = struct {
         w.status_timer = 0;
         w.clash_cooldown = 0;
         w.phase = .calm;
+        w.phase_offset = 0;
         w.territories = initTerritories();
         w.event_count = 0;
         w.gen_records = @splat(.{});
@@ -536,6 +547,118 @@ pub const World = struct {
         return n;
     }
 
+    pub fn foodCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (w.resources.items) |r| {
+            if (r.amount > 0 and !r.corpse) n += 1;
+        }
+        return n;
+    }
+
+    pub fn corpseCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (w.resources.items) |r| {
+            if (r.amount > 0 and r.corpse) n += 1;
+        }
+        return n;
+    }
+
+    pub fn phaseClock(w: *const World) f32 {
+        return w.time + w.phase_offset;
+    }
+
+    /// Immediately jump the world weather cycle to the start of `p`.
+    pub fn setPhase(w: *World, p: WorldPhase) void {
+        const target: f32 = switch (p) {
+            .calm => 0,
+            .bloom => 145,
+            .storm => 235,
+        };
+        var off = target - @mod(w.time, cycle_length);
+        if (off < 0) off += cycle_length;
+        w.phase_offset = off;
+        if (p != w.phase) {
+            w.phase = p;
+            if (p == .bloom) w.pushEvent(0, .world_bloom, 0);
+            if (p == .storm) w.pushEvent(0, .world_storm, 0);
+        }
+    }
+
+    /// Flood the world with `count` fresh food items across living territories and the wild.
+    pub fn floodFood(w: *World, count: usize) !void {
+        const wild = bounds.inset(80);
+        for (0..count) |k| {
+            var pos: Vec2 = undefined;
+            var food: FoodType = .universal;
+            if (k % 4 < 3) {
+                const si = k % society_count;
+                pos = w.randomIn(w.territories[si].inset(16));
+                food = if (w.rng().boolean()) societies[si].food else .universal;
+            } else {
+                pos = w.randomIn(wild);
+                food = if (w.rng().boolean()) .universal else @fromBackingInt(@intCast(w.rng().intRangeLessThan(u8, 0, food_type_count)));
+            }
+            try w.resources.append(w.gpa, .{
+                .pos = pos,
+                .food = food,
+                .amount = food_amount,
+                .patch = null,
+                .corpse = false,
+            });
+            w.field.deposit(scentChannel(food), pos.x, pos.y, 1.5);
+        }
+    }
+
+    /// Drop a dense cluster of food around `pos` (e.g. at the camera center).
+    pub fn dropFoodCluster(w: *World, pos: Vec2, food: FoodType, count: usize, spread: f32) !void {
+        const safe = bounds.inset(20);
+        for (0..count) |_| {
+            const a = w.rng().float(f32) * std.math.tau;
+            const d = @sqrt(w.rng().float(f32)) * spread;
+            const p = Vec2{
+                .x = std.math.clamp(pos.x + @cos(a) * d, safe.x, safe.x + safe.w),
+                .y = std.math.clamp(pos.y + @sin(a) * d, safe.y, safe.y + safe.h),
+            };
+            try w.resources.append(w.gpa, .{
+                .pos = p,
+                .food = food,
+                .amount = food_amount,
+                .patch = null,
+                .corpse = false,
+            });
+            w.field.deposit(scentChannel(food), p.x, p.y, 1.8);
+        }
+    }
+
+    /// Remove all food and food scents from the world and halt regrowth (scarcity = .none).
+    pub fn clearAllFood(w: *World) void {
+        w.resources.clearRetainingCapacity();
+        for (w.patches.items) |*p| {
+            p.live = 0;
+            p.timer = 0;
+        }
+        for (0..food_type_count) |t| {
+            @memset(w.field.data[scentChannel(@fromBackingInt(@intCast(t)))], 0);
+        }
+        w.scarcity = .none;
+    }
+
+    /// Spawn a batch of fresh entities into a society's living territory (capped at max_population).
+    pub fn spawnRandomBatch(w: *World, society: u8, count: usize) !usize {
+        var spawned: usize = 0;
+        const area = w.territories[society].inset(28);
+        for (0..count) |_| {
+            if (w.entities.items.len >= max_population) break;
+            const g = try gen.Genome.random(w.gpa, w.rng(), w.circuit.types);
+            const e = try w.addEntity(society, w.randomIn(area), g);
+            e.age = maturity_age + w.rng().float(f32) * 20;
+            e.lineage = e.id;
+            w.recordGeneration(e);
+            spawned += 1;
+        }
+        return spawned;
+    }
+
     /// Advance the simulation by one fixed tick.
     pub fn step(w: *World, dt: f32) !void {
         w.time += dt;
@@ -583,20 +706,23 @@ pub const World = struct {
 
     fn updateFood(w: *World, dt: f32) !void {
         const rate = w.scarcity.regrowth() * w.phase.regrowth();
-        for (w.patches.items, 0..) |*p, i| {
-            if (p.budget <= 0) {
-                if (p.live == 0) w.relocate(p);
-                continue;
-            }
-            p.timer += dt * rate;
-            if (p.timer >= 2.5) {
-                p.timer = 0;
-                if (p.live < patch_items) try w.spawnFood(p, @intCast(i));
+        if (rate > 0) {
+            const max_items: u16 = if (w.scarcity == .feast) patch_items * 2 else patch_items;
+            for (w.patches.items, 0..) |*p, i| {
+                if (p.budget <= 0) {
+                    if (p.live == 0) w.relocate(p);
+                    continue;
+                }
+                p.timer += dt * rate;
+                if (p.timer >= 2.5) {
+                    p.timer = 0;
+                    if (p.live < max_items) try w.spawnFood(p, @intCast(i));
+                }
             }
         }
 
         for (w.resources.items) |*r| {
-            if (r.patch == null) r.amount -= 1.2 * dt; // corpses rot
+            if (r.corpse) r.amount -= 1.2 * dt; // corpses rot
             if (r.amount > 0) w.field.deposit(scentChannel(r.food), r.pos.x, r.pos.y, r.amount / food_amount * 3.0 * dt);
         }
     }
@@ -734,12 +860,15 @@ pub const World = struct {
         e.enemy = null;
         e.ally = null;
         e.mate = null;
+        e.cannibal_target = false;
         e.enemies_near = 0;
         e.allies_near = 0;
         var close_allies: u32 = 0;
         e.enemy_dist = sense_range;
         e.ally_dist = sense_range;
         var mate_dist: f32 = sense_range;
+        var weak_kin: ?u32 = null;
+        var weak_kin_dist: f32 = sense_range;
         const ready = e.readyToMate();
         for (w.entities.items, 0..) |*o, oi| {
             if (o.id == e.id or o.dead != null) continue;
@@ -758,6 +887,10 @@ pub const World = struct {
                     e.ally_dist = d;
                     e.ally = @intCast(oi);
                 }
+                if (o.energy <= e.energy + 12 and o.energy < 70 and d < weak_kin_dist) {
+                    weak_kin_dist = d;
+                    weak_kin = @intCast(oi);
+                }
             }
             if (ready and o.readyToMate() and d < mate_dist) {
                 mate_dist = d;
@@ -765,6 +898,16 @@ pub const World = struct {
             }
         }
         e.huddled = close_allies >= 2;
+        // Emergent starvation cannibalism: desperate meat-capable predators with no food
+        // in sight or smell can turn on weaker kin as a last-resort survival strategy.
+        if (!w.forage_only and e.enemy == null and weak_kin != null and
+            e.energy < 36 and e.since_meal > 18 and e.visible_food == null and e.odour < 0.08 and
+            canEat(e, .meat) > 0 and e.genome.trait(.aggression) > 0.58)
+        {
+            e.enemy = weak_kin;
+            e.enemy_dist = weak_kin_dist;
+            e.cannibal_target = true;
+        }
     }
 
     fn act(w: *World, i: usize, dt: f32) !void {
@@ -798,6 +941,17 @@ pub const World = struct {
             });
         }
 
+        // Stay near home when fed and territorial; adventurous or hungry entities roam far out into the wild.
+        // Desperate meat-capable predators with zero food in sight or smell hunt prey (including kin).
+        const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
+        const starving_hunt = !w.forage_only and e.enemy != null and e.visible_food == null and
+            (e.cannibal_target or (e.energy < 36 and e.since_meal > 18 and e.odour < 0.08 and canEat(e, .meat) > 0 and g.trait(.aggression) > 0.58));
+        if (starving_hunt) {
+            e.action = .fight;
+        } else if (e.energy < 35 and e.action != .flee) {
+            e.action = .forage;
+        }
+
         // Steering comes from the fly circuit unless a social goal overrides it.
         // A slow baseline is subtracted to cancel the connectome's built-in
         // left/right bias. The left antenna sits at heading - 0.5, so more
@@ -814,10 +968,6 @@ pub const World = struct {
             .flee => if (e.enemy) |o| away(e.pos, w.entities.items[o].pos) else null,
         };
         if (target) |t| turn = steerTo(e.heading, e.pos, t, 5);
-
-        // Stay near home when fed and territorial; adventurous or hungry entities roam far out into the wild.
-        const hunger = std.math.clamp((80 - e.energy) / 60, 0, 1);
-        if (e.energy < 35 and e.action != .flee) e.action = .forage;
 
         // Adventure / exploration drive + active communication + visual food pursuit + storm huddling.
         e.explore_timer = @max(0, e.explore_timer - dt);
@@ -971,6 +1121,7 @@ pub const World = struct {
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
         if (e.action == .flee and e.enemy != null) speed = base * 1.2;
+        if (starving_hunt) speed = @max(speed, base * 1.12);
         if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or acted_on_signal) {
             speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
         }
@@ -1080,9 +1231,19 @@ pub const World = struct {
                     if (!w.forage_only and o.call_cooldown <= 0) w.emitSignal(oi, .danger_call, e.pos);
                     w.field.deposit(alarmChannel(o.society), o.pos.x, o.pos.y, dmg * 0.6);
                     if (o.energy <= 0 and o.dead == null) {
+                        const is_cannibal = o.society == e.society;
                         e.kills += 1;
                         e.addSkill(.combat, 0.08);
                         e.genome.cog.learn(0.6);
+                        if (is_cannibal) {
+                            e.cannibal_kills += 1;
+                            const st = &w.stats[e.society];
+                            st.cannibal_kills += 1;
+                            if (!st.had_cannibalism or st.cannibal_kills % 10 == 0) {
+                                st.had_cannibalism = true;
+                                w.pushEvent(e.society, .cannibalism, st.cannibal_kills);
+                            }
+                        }
                         try w.kill(oi, .killed);
                     }
                 }
@@ -1109,7 +1270,7 @@ pub const World = struct {
         w.stats[e.society].deaths[@backingInt(cause)] += 1;
         w.field.deposit(alarmChannel(e.society), e.pos.x, e.pos.y, 8);
         if (cause != .old_age or w.rng().boolean()) {
-            try w.resources.append(w.gpa, .{ .pos = e.pos, .food = .meat, .amount = 30, .patch = null });
+            try w.resources.append(w.gpa, .{ .pos = e.pos, .food = .meat, .amount = 30, .patch = null, .corpse = true });
         }
     }
 
@@ -1196,7 +1357,7 @@ pub const World = struct {
     }
 
     fn updateWorldPhase(w: *World) void {
-        const t = @mod(w.time, cycle_length);
+        const t = @mod(w.time + w.phase_offset, cycle_length);
         const next: WorldPhase = if (t < 145) .calm else if (t < 235) .bloom else .storm;
         if (next != w.phase) {
             w.phase = next;
@@ -1498,7 +1659,7 @@ pub const World = struct {
         const away_a = std.math.atan2(-ny, -nx);
         const away_b = std.math.atan2(ny, nx);
 
-        if (a.society == b.society) {
+        if (a.society == b.society and !a.cannibal_target and !b.cannibal_target) {
             // Kin slide smoothly past each other along the tangent instead of bouncing off their trail.
             const tx = -ny;
             const ty = nx;

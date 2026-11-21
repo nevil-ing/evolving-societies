@@ -47,9 +47,10 @@ def main():
             f"(peak {max(int(r['pop']) for r in rows)}) | Max gen: {end['max_gen']} | "
             f"Active lineages: {end['active_lineages']}"
         )
+        cann = f" cannibal={end['cannibal_kills']}" if "cannibal_kills" in end else ""
         print(
             f"  Totals: births={end['births']} starved={end['starved']} "
-            f"old_age={end['old_age']} killed={end['killed']} hybrids={end['hybrids']}"
+            f"old_age={end['old_age']} killed={end['killed']}{cann} hybrids={end['hybrids']}"
         )
         print("  Trait drift (start -> last alive):")
         for k, label in [

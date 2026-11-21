@@ -445,3 +445,76 @@ test "world: spawnClone preserves captured traits, skills, cognitive brain, and 
     try std.testing.expectApproxEqAbs(@as(f32, 0.77), clone.skill(.foraging), 1e-5);
     try std.testing.expectApproxEqAbs(@as(f32, 0.91), clone.genome.trait(.efficiency), 1e-5);
 }
+
+test "world: clearAllFood halts regrowth, floodFood populates, setPhase jumps weather" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 404);
+    try std.testing.expect(w.foodCount() > 50);
+
+    w.clearAllFood();
+    try std.testing.expectEqual(@as(u32, 0), w.foodCount());
+    try std.testing.expectEqual(sim.Scarcity.none, w.scarcity);
+    // Step 5 seconds: zero food should regrow when scarcity is .none.
+    for (0..60 * 5) |_| try w.step(1.0 / 60.0);
+    try std.testing.expectEqual(@as(u32, 0), w.foodCount());
+
+    try w.floodFood(120);
+    try std.testing.expectEqual(@as(u32, 120), w.foodCount());
+
+    w.setPhase(.storm);
+    try std.testing.expectEqual(sim.WorldPhase.storm, w.phase);
+    try std.testing.expect(sim.phaseRemaining(w.phaseClock()) > 60);
+
+    const spawned = try w.spawnRandomBatch(0, 10);
+    try std.testing.expectEqual(@as(usize, 10), spawned);
+}
+
+test "world: starvation cannibalism emerges when all food is removed" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 911);
+    w.clearAllFood();
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    const hunter = &w.entities.items[0];
+    hunter.society = 0; // Triangles (meat-eater)
+    hunter.age = 45;
+    hunter.energy = 32;
+    hunter.since_meal = 28;
+    hunter.pos = .{ .x = 0, .y = 0 };
+    hunter.heading = 0;
+    hunter.genome.traits[@backingInt(gen.Trait.aggression)] = 0.92;
+    hunter.genome.traits[@backingInt(gen.Trait.speed)] = 0.85;
+    hunter.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    for (hunter.genome.fly_gain) |*g| g.* = 1.0;
+
+    const prey = &w.entities.items[1];
+    prey.society = 0; // Same society (kin!)
+    prey.age = 45;
+    prey.energy = 10;
+    prey.since_meal = 28;
+    prey.pos = .{ .x = 26, .y = 0 };
+    prey.genome.traits[@backingInt(gen.Trait.aggression)] = 0.1;
+
+    for (0..60 * 6) |_| try w.step(1.0 / 60.0);
+
+    try std.testing.expect(w.stats[0].cannibal_kills >= 1);
+    var saw_event = false;
+    for (w.events[0..w.event_count]) |ev| {
+        if (ev.kind == .cannibalism) saw_event = true;
+    }
+    try std.testing.expect(saw_event);
+    // Survivor should have eaten from the fallen kin's corpse.
+    try std.testing.expect(w.entities.items.len == 1);
+    try std.testing.expect(w.entities.items[0].food_eaten > 1.0);
+}

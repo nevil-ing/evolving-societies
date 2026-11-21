@@ -21,6 +21,8 @@ const newSeed = ui.newSeed;
 
 const Overlay = enum { trails, scent, off };
 const speeds = [_]u32{ 1, 2, 4, 8, 16 };
+const release_batches = [_]usize{ 1, 5, 10, 25, 50 };
+const food_batches = [_]usize{ 25, 75, 150, 300 };
 
 const max_specimens = 16;
 
@@ -58,6 +60,9 @@ const App = struct {
     show_key: bool = true,
     show_gens: bool = false,
     show_lab: bool = false,
+    show_exp: bool = false,
+    release_batch: usize = 0,
+    food_batch: usize = 2,
     specimens: [max_specimens]Specimen = undefined,
     specimen_count: usize = 0,
     lab_active: usize = 0,
@@ -268,11 +273,24 @@ fn input(app: *App) !void {
     if (rl.IsKeyPressed(rl.KEY_L)) app.show_key = !app.show_key;
     if (rl.IsKeyPressed(rl.KEY_G)) {
         app.show_gens = !app.show_gens;
-        if (app.show_gens) app.show_lab = false;
+        if (app.show_gens) {
+            app.show_lab = false;
+            app.show_exp = false;
+        }
     }
     if (rl.IsKeyPressed(rl.KEY_T)) {
         app.show_lab = !app.show_lab;
-        if (app.show_lab) app.show_gens = false;
+        if (app.show_lab) {
+            app.show_gens = false;
+            app.show_exp = false;
+        }
+    }
+    if (rl.IsKeyPressed(rl.KEY_E)) {
+        app.show_exp = !app.show_exp;
+        if (app.show_exp) {
+            app.show_gens = false;
+            app.show_lab = false;
+        }
     }
     if (rl.IsKeyPressed(rl.KEY_S) and rl.IsKeyDown(rl.KEY_LEFT_SHIFT)) {
         if (app.selected) |id| if (app.world.findById(id)) |e| try captureSpecimen(app, e);
@@ -280,8 +298,14 @@ fn input(app: *App) !void {
     if (rl.IsKeyPressed(rl.KEY_C)) app.follow = !app.follow and app.selected != null;
     if (rl.IsKeyPressed(rl.KEY_R)) try restart(app);
     if (rl.IsKeyPressed(rl.KEY_ESCAPE)) {
-        app.selected = null;
-        app.follow = false;
+        if (app.show_exp or app.show_lab or app.show_gens) {
+            app.show_exp = false;
+            app.show_lab = false;
+            app.show_gens = false;
+        } else {
+            app.selected = null;
+            app.follow = false;
+        }
     }
 
     if (rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
@@ -388,7 +412,7 @@ fn drawWorld(app: *App) void {
     for (w.resources.items) |r| {
         if (r.amount <= 0) continue;
         const radius = 2 + 3 * @sqrt(@min(r.amount, 40) / 40);
-        const col = if (r.patch == null) rgb(150, 40, 40) else foodColor(r.food);
+        const col = if (r.corpse) rgb(150, 40, 40) else foodColor(r.food);
         rl.DrawCircleV(v2(r.pos), radius, col);
     }
 
@@ -558,7 +582,7 @@ fn drawHud(app: *App) !void {
     for (0..sim.society_count) |s| total += w.population(s);
     text(24, 20, 22, rgb(235, 235, 245), "{d}:{d:0>2}", .{ mins, secs });
     text(100, 25, 13, rgb(170, 175, 190), "{s} x{d}", .{ if (app.paused) "PAUSED" else "running", speeds[app.speed] });
-    drawPhaseBadge(210, 24, w.phase, sim.phaseRemaining(w.time));
+    drawPhaseBadge(210, 24, w.phase, sim.phaseRemaining(w.phaseClock()));
     text(24, 50, 14, rgb(200, 200, 215), "Population {d}   Max generation {d}", .{ total, w.max_generation });
     text(24, 70, 14, rgb(200, 200, 215), "Food: {s}   Overlay: {s}", .{ @tagName(w.scarcity), @tagName(app.overlay) });
 
@@ -600,6 +624,8 @@ fn drawHud(app: *App) !void {
         drawGenerationsPanel(app, sw);
     } else if (app.show_lab) {
         try drawLabPanel(app, sw);
+    } else if (app.show_exp) {
+        try drawExpPanel(app, sw);
     } else {
         drawToasts(app, sw);
     }
@@ -643,7 +669,7 @@ fn drawHud(app: *App) !void {
     }
     if (ui.button(rect(zx + 122, zy, 34, 30), " +", .{})) zoomBy(&app.camera, 1.25, null);
 
-    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G history  T lab  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
+    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G history  T lab  E controls  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
     text(sw - 560, sh - 22, 11, rgb(100, 105, 120), "Fly circuit: FlyWire connectome v783 (Dorkenwald et al. 2024; Schlegel et al. 2024; Shiu et al. 2024)", .{});
 
     if (app.selected) |id| {
@@ -666,7 +692,7 @@ fn drawStatusBadge(x: f32, y: f32, st: sim.SocietyStatus) void {
 
 fn drawAlertBar(app: *App, sw: f32) void {
     const w = &app.world;
-    const bw: f32 = 460;
+    const bw: f32 = 524;
     const bx = (sw - bw) * 0.5;
     if (bx < 322) return;
     const r = rect(bx, 12, bw, 32);
@@ -688,25 +714,43 @@ fn drawAlertBar(app: *App, sw: f32) void {
         text(bx + 28, 20, 12, rgb(225, 230, 240), "{s}", .{msg});
     } else {
         rl.DrawCircleV(.{ .x = bx + 16, .y = 28 }, 4.5, rgb(110, 210, 140));
-        text(bx + 28, 20, 12, rgb(175, 180, 195), "All societies active - press G for history or T for Lab", .{});
+        text(bx + 28, 20, 12, rgb(175, 180, 195), "All societies active - E controls, T lab, G history", .{});
     }
 
-    const lab_btn = rect(bx + bw - 160, 17, 64, 22);
+    const exp_btn = rect(bx + bw - 208, 17, 58, 22);
+    const exp_hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), exp_btn);
+    rl.DrawRectangleRounded(exp_btn, 0.35, 6, if (app.show_exp) rgb(76, 56, 98) else if (exp_hover) rgb(60, 68, 94) else rgb(36, 42, 60));
+    text(exp_btn.x + 8, exp_btn.y + 4, 11, rgb(245, 195, 115), "Exp E", .{});
+    if (exp_hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
+        app.show_exp = !app.show_exp;
+        if (app.show_exp) {
+            app.show_gens = false;
+            app.show_lab = false;
+        }
+    }
+
+    const lab_btn = rect(bx + bw - 144, 17, 62, 22);
     const lab_hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), lab_btn);
-    rl.DrawRectangleRounded(lab_btn, 0.35, 6, if (lab_hover) rgb(60, 68, 94) else rgb(36, 42, 60));
+    rl.DrawRectangleRounded(lab_btn, 0.35, 6, if (app.show_lab) rgb(44, 74, 82) else if (lab_hover) rgb(60, 68, 94) else rgb(36, 42, 60));
     text(lab_btn.x + 8, lab_btn.y + 4, 11, rgb(140, 225, 215), "Lab {d}", .{app.specimen_count});
     if (lab_hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
         app.show_lab = !app.show_lab;
-        if (app.show_lab) app.show_gens = false;
+        if (app.show_lab) {
+            app.show_gens = false;
+            app.show_exp = false;
+        }
     }
 
-    const btn = rect(bx + bw - 92, 17, 84, 22);
+    const btn = rect(bx + bw - 76, 17, 68, 22);
     const hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), btn);
-    rl.DrawRectangleRounded(btn, 0.35, 6, if (hover) rgb(60, 68, 94) else rgb(36, 42, 60));
-    text(btn.x + 8, btn.y + 4, 11, rgb(215, 220, 235), "{s}", .{if (app.show_gens) "Hide G" else "History G"});
+    rl.DrawRectangleRounded(btn, 0.35, 6, if (app.show_gens) rgb(54, 66, 96) else if (hover) rgb(60, 68, 94) else rgb(36, 42, 60));
+    text(btn.x + 8, btn.y + 4, 11, rgb(215, 220, 235), "{s}", .{if (app.show_gens) "Hide G" else "Hist G"});
     if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
         app.show_gens = !app.show_gens;
-        if (app.show_gens) app.show_lab = false;
+        if (app.show_gens) {
+            app.show_lab = false;
+            app.show_exp = false;
+        }
     }
 }
 
@@ -791,6 +835,7 @@ fn captureSpecimen(app: *App, e: *const sim.Entity) !void {
     }
     app.show_lab = true;
     app.show_gens = false;
+    app.show_exp = false;
 }
 
 fn drawLabPanel(app: *App, sw: f32) !void {
@@ -798,7 +843,7 @@ fn drawLabPanel(app: *App, sw: f32) !void {
     const px = (sw - pw) * 0.5;
     if (px < 322) return;
     const py: f32 = 52;
-    const ph: f32 = 468;
+    const ph: f32 = 500;
     panel(px, py, pw, ph);
 
     var y = py + 12;
@@ -848,13 +893,19 @@ fn drawLabPanel(app: *App, sw: f32) !void {
     text(px + 14, y + 20, 11, rgb(175, 180, 195), "lineage #{d}  kids {d}  kills {d}  food {d:.0}  travel {d:.0}u  brain {d}n/{d}s", .{
         a.lineage, a.children, a.kills, a.food_eaten, a.distance_traveled, a.cog.totalNeurons(), a.cog.activeSynapses(),
     });
+    y += 38;
 
-    // Action buttons for active specimen: Compare, Mutate, Release Clone.
-    const cmp_r = rect(px + pw - 262, y, 76, 22);
-    const mut_r = rect(px + pw - 180, y, 72, 22);
-    const rel_r = rect(px + pw - 102, y, 88, 22);
+    // Action buttons row: Compare, Hybrid toggle, Mutate, Batch size, Release Clones.
+    const cmp_r = rect(px + 14, y, 86, 22);
+    const hyb_r = rect(px + 106, y, 76, 22);
+    const mut_r = rect(px + 188, y, 74, 22);
+    const qty_r = rect(px + 332, y, 64, 22);
+    const rel_r = rect(px + 402, y, 124, 22);
     if (smallBtn(cmp_r, if (app.lab_compare != null) "Clear Cmp" else "Pin Cmp", rgb(44, 68, 66))) {
         app.lab_compare = if (app.lab_compare != null) null else app.lab_active;
+    }
+    if (smallBtn(hyb_r, if (a.hybrid) "Hybrid ON" else "Hybrid OFF", if (a.hybrid) rgb(88, 74, 30) else rgb(42, 46, 62))) {
+        a.hybrid = !a.hybrid;
     }
     if (smallBtn(mut_r, "Mutate", rgb(76, 48, 92))) {
         const rng = app.world.prng.random();
@@ -862,23 +913,44 @@ fn drawLabPanel(app: *App, sw: f32) !void {
         _ = a.cog.addRandomSynapse(rng);
         if (rng.boolean()) _ = a.cog.addNeuron(rng);
     }
-    if (smallBtn(rel_r, "Release", rgb(34, 82, 54))) {
-        const home = app.world.territories[a.society].center();
-        const spawned = try app.world.spawnClone(
-            a.society,
-            home,
-            a.traits,
-            a.motor,
-            a.cog,
-            a.fly_gain,
-            a.skills,
-            a.generation,
-            a.lineage,
-            a.hybrid,
-        );
-        app.selected = spawned.id;
+    const qty = release_batches[app.release_batch];
+    var qbuf: [20]u8 = undefined;
+    const qlabel = try std.fmt.bufPrint(&qbuf, "Qty: x{d}", .{qty});
+    if (smallBtn(qty_r, qlabel, rgb(48, 56, 82))) {
+        app.release_batch = (app.release_batch + 1) % release_batches.len;
     }
-    y += 42;
+    var rbuf: [28]u8 = undefined;
+    const rlabel = try std.fmt.bufPrint(&rbuf, "Release x{d}", .{qty});
+    if (smallBtn(rel_r, rlabel, rgb(34, 82, 54))) {
+        const home = app.world.territories[a.society].center();
+        const safe = sim.bounds.inset(20);
+        const rng = app.world.prng.random();
+        var last_id: ?u32 = null;
+        for (0..qty) |k| {
+            if (app.world.entities.items.len >= sim.max_population) break;
+            const spread: f32 = if (qty == 1) 0 else 18 + @sqrt(@as(f32, @floatFromInt(k + 1))) * 14;
+            const ang = rng.float(f32) * std.math.tau;
+            const pos = sim.Vec2{
+                .x = std.math.clamp(home.x + @cos(ang) * spread, safe.x, safe.x + safe.w),
+                .y = std.math.clamp(home.y + @sin(ang) * spread, safe.y, safe.y + safe.h),
+            };
+            const spawned = try app.world.spawnClone(
+                a.society,
+                pos,
+                a.traits,
+                a.motor,
+                a.cog,
+                a.fly_gain,
+                a.skills,
+                a.generation,
+                a.lineage,
+                a.hybrid,
+            );
+            last_id = spawned.id;
+        }
+        if (last_id) |id| app.selected = id;
+    }
+    y += 30;
 
     const cmp: ?*const Specimen = if (app.lab_compare) |ci| (if (ci < app.specimen_count and ci != app.lab_active) &app.specimens[ci] else null) else null;
     if (cmp) |b| {
@@ -948,6 +1020,132 @@ fn drawLabPanel(app: *App, sw: f32) !void {
         const ss: []const u8 = if (ds >= 0) "+" else "";
         text(col2_x, y2 + 76, 10, rgb(165, 210, 235), "vs baseline: {s}{d} neurons, {s}{d} synapses", .{ sn, dn, ss, ds });
     }
+}
+
+fn drawExpPanel(app: *App, sw: f32) !void {
+    const w = &app.world;
+    const pw: f32 = 524;
+    const px = (sw - pw) * 0.5;
+    if (px < 322) return;
+    const py: f32 = 52;
+    const ph: f32 = 344;
+    panel(px, py, pw, ph);
+
+    var y = py + 12;
+    text(px + 14, y, 15, rgb(235, 235, 245), "Experiment Controls - Food, Weather & Spawning (E)", .{});
+    y += 22;
+    text(px + 14, y, 11, rgb(175, 185, 200), "Food items: {d}   Corpses: {d}   Cannibal kills: T {d} / C {d} / S {d}", .{
+        w.foodCount(),
+        w.corpseCount(),
+        w.stats[0].cannibal_kills,
+        w.stats[1].cannibal_kills,
+        w.stats[2].cannibal_kills,
+    });
+    y += 24;
+
+    // 1. Food Supply & Stress Tests
+    text(px + 14, y, 12, rgb(225, 228, 240), "Food regrowth rate", .{});
+    y += 18;
+    const scarcities = [_]struct { sim.Scarcity, []const u8 }{
+        .{ .feast, "Feast 5x" },
+        .{ .abundant, "Abund 2x" },
+        .{ .normal, "Normal" },
+        .{ .scarce, "Scarce" },
+        .{ .famine, "Famine" },
+        .{ .none, "None 0x" },
+    };
+    var sx = px + 14;
+    for (scarcities) |sc| {
+        const active = w.scarcity == sc[0];
+        const col = if (active) (if (sc[0] == .none) rgb(135, 42, 48) else if (sc[0] == .feast) rgb(40, 102, 62) else rgb(54, 72, 110)) else rgb(34, 38, 54);
+        if (smallBtn(rect(sx, y, 78, 22), sc[1], col)) w.scarcity = sc[0];
+        sx += 83;
+    }
+    y += 32;
+
+    // Food drop amount selector
+    text(px + 14, y + 3, 12, rgb(210, 215, 230), "Food drop amount:", .{});
+    var fx = px + 144;
+    for (food_batches, 0..) |amt, idx| {
+        var fbuf: [16]u8 = undefined;
+        const flab = try std.fmt.bufPrint(&fbuf, "+{d}", .{amt});
+        const col = if (app.food_batch == idx) rgb(58, 76, 112) else rgb(34, 38, 54);
+        if (smallBtn(rect(fx, y, 54, 21), flab, col)) app.food_batch = idx;
+        fx += 60;
+    }
+    y += 28;
+
+    const famt = food_batches[app.food_batch];
+    const cluster_amt = @max(@as(usize, 10), famt / 3);
+    var b1: [32]u8 = undefined;
+    var b2: [32]u8 = undefined;
+    if (smallBtn(rect(px + 14, y, 124, 24), try std.fmt.bufPrint(&b1, "Food Flood (+{d})", .{famt}), rgb(34, 92, 58))) {
+        try w.floodFood(famt);
+    }
+    if (smallBtn(rect(px + 144, y, 118, 24), try std.fmt.bufPrint(&b2, "Drop Here (+{d})", .{cluster_amt}), rgb(76, 72, 32))) {
+        try w.dropFoodCluster(.{ .x = app.camera.target.x, .y = app.camera.target.y }, .universal, cluster_amt, 75);
+    }
+    if (smallBtn(rect(px + 268, y, 128, 24), "Clear All Food (0)", rgb(135, 38, 46))) {
+        w.clearAllFood();
+    }
+    if (smallBtn(rect(px + 402, y, 108, 24), "Restore (+60)", rgb(44, 62, 92))) {
+        w.scarcity = .normal;
+        try w.floodFood(60);
+    }
+    y += 38;
+
+    // 2. Weather & Environment
+    text(px + 14, y, 12, rgb(225, 228, 240), "Weather phase (trigger immediately)", .{});
+    y += 18;
+    const phases = [_]struct { sim.WorldPhase, []const u8, rl.Color }{
+        .{ .calm, "Calm (2:25)", rgb(42, 62, 96) },
+        .{ .bloom, "Wild Bloom (1:30)", rgb(32, 90, 58) },
+        .{ .storm, "Harsh Storm (1:05)", rgb(74, 52, 110) },
+    };
+    var wx = px + 14;
+    for (phases) |ph_item| {
+        const active = w.phase == ph_item[0];
+        const col = if (active) ph_item[2] else rgb(34, 38, 54);
+        if (smallBtn(rect(wx, y, 160, 24), ph_item[1], col)) w.setPhase(ph_item[0]);
+        wx += 168;
+    }
+    y += 38;
+
+    // 3. Population & Batch Release Spawner
+    var total_pop: u32 = 0;
+    for (0..sim.society_count) |si| total_pop += w.population(si);
+    text(px + 14, y, 12, rgb(225, 228, 240), "Population release  ({d} / {d} cap)", .{ total_pop, sim.max_population });
+    y += 18;
+    text(px + 14, y + 3, 11, rgb(180, 185, 200), "Release amount:", .{});
+    var bx = px + 124;
+    for (release_batches, 0..) |cnt, idx| {
+        var rbuf: [16]u8 = undefined;
+        const rlab = try std.fmt.bufPrint(&rbuf, "x{d}", .{cnt});
+        const col = if (app.release_batch == idx) rgb(58, 76, 112) else rgb(34, 38, 54);
+        if (smallBtn(rect(bx, y, 48, 21), rlab, col)) app.release_batch = idx;
+        bx += 54;
+    }
+    y += 28;
+
+    const rqty = release_batches[app.release_batch];
+    var s0: [28]u8 = undefined;
+    var s1: [28]u8 = undefined;
+    var s2: [28]u8 = undefined;
+    var s3: [28]u8 = undefined;
+    if (smallBtn(rect(px + 14, y, 120, 24), try std.fmt.bufPrint(&s0, "+Triangles (+{d})", .{rqty}), rgb(110, 42, 42))) {
+        _ = try w.spawnRandomBatch(0, rqty);
+    }
+    if (smallBtn(rect(px + 140, y, 114, 24), try std.fmt.bufPrint(&s1, "+Circles (+{d})", .{rqty}), rgb(38, 62, 112))) {
+        _ = try w.spawnRandomBatch(1, rqty);
+    }
+    if (smallBtn(rect(px + 260, y, 116, 24), try std.fmt.bufPrint(&s2, "+Squares (+{d})", .{rqty}), rgb(36, 92, 54))) {
+        _ = try w.spawnRandomBatch(2, rqty);
+    }
+    if (smallBtn(rect(px + 382, y, 128, 24), try std.fmt.bufPrint(&s3, "+All (+{d} each)", .{rqty}), rgb(54, 60, 84))) {
+        for (0..sim.society_count) |si| _ = try w.spawnRandomBatch(@intCast(si), rqty);
+    }
+    y += 32;
+    text(px + 14, y, 10, rgb(140, 148, 165), "Tip: Clear All Food halts regrowth to test famine survival & emergent cannibalism. Specimen Lab shares Release amount.", .{});
 }
 
 fn smallBtn(r: rl.Rectangle, label: []const u8, base_col: rl.Color) bool {
@@ -1072,6 +1270,7 @@ fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
         .first_hybrid => std.fmt.bufPrint(buf, "{d}:{d:0>2}  First {s} hybrid born (Gen {d})", .{ mins, secs, name, ev.value }),
         .hybrid_majority => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Hybrids now lead {s} ({d} pop)", .{ mins, secs, name, ev.value }),
         .territory_clash => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} & {s} contesting territory!", .{ mins, secs, name, sim.societies[@min(ev.value, sim.society_count - 1)].name }),
+        .cannibalism => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Cannibalism emerged in {s} ({d} kills)!", .{ mins, secs, name, ev.value }),
         .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom - abundant food growth", .{ mins, secs }),
         .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
@@ -1081,6 +1280,7 @@ fn eventColor(ev: sim.WorldEvent) rl.Color {
     return switch (ev.kind) {
         .endangered, .territory_clash => rgb(250, 185, 70),
         .critical, .extinct => rgb(255, 85, 75),
+        .cannibalism => rgb(255, 75, 125),
         .recovered, .boom, .world_bloom => rgb(100, 235, 145),
         .milestone_gen => societyColor(sim.societies[ev.society]),
         .first_hybrid, .hybrid_majority => rgb(255, 220, 70),
@@ -1233,7 +1433,9 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     y += 22;
     text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lin #{d}  age {d:.1}/{d:.0}m  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age / 60, e.lifespan / 60, e.children, e.kills });
     y += 15;
-    const suffix: []const u8 = if (e.resting)
+    const suffix: []const u8 = if (e.cannibal_target and e.action == .fight)
+        " (hunting kin)"
+    else if (e.resting)
         " (resting)"
     else if (e.feeding)
         " (feeding)"
