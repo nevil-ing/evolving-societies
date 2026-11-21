@@ -258,3 +258,31 @@ test "world: adventurous entities travel outside home territory and world phases
     // At 70s, world should have progressed through bloom into storm phase.
     try std.testing.expectEqual(sim.WorldPhase.storm, w.phase);
 }
+
+test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work" {
+    var prng = std.Random.DefaultPrng.init(2026);
+    const rng = prng.random();
+    var brain = gen.CognitiveBrain.random(rng);
+    const start_neurons = brain.totalNeurons();
+    const start_synapses = brain.activeSynapses();
+
+    try std.testing.expect(brain.addNeuron(rng));
+    try std.testing.expectEqual(start_neurons + 1, brain.totalNeurons());
+    try std.testing.expectEqual(start_synapses + 1, brain.activeSynapses());
+
+    try std.testing.expect(brain.sproutFromExperience(rng));
+    try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
+
+    // Run a decision then apply positive reward: weights on active paths should adapt.
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0 });
+    var before: f32 = 0;
+    for (brain.synapses[0..brain.synapse_count]) |s| if (s.active) {
+        before += @abs(s.weight);
+    };
+    brain.learn(1.0);
+    var after: f32 = 0;
+    for (brain.synapses[0..brain.synapse_count]) |s| if (s.active) {
+        after += @abs(s.weight);
+    };
+    try std.testing.expect(@abs(after - before) > 1e-4);
+}

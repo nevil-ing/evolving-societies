@@ -659,10 +659,10 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
     }
 
     y += 6;
-    // 3. Generation Progression Table (inherited skills & traits at birth)
-    text(px + 14, y, 12, rgb(210, 215, 230), "Generations (inherited skills & traits at birth)", .{});
+    // 3. Generation Progression Table (inherited skills, traits & cognitive brain growth)
+    text(px + 14, y, 12, rgb(210, 215, 230), "Generations (skills, traits & cognitive brain at birth)", .{});
     y += 18;
-    text(px + 14, y, 10, rgb(135, 142, 160), "Gen    Births    Forage    Nav     Combat    Care      Eff     Adapt", .{});
+    text(px + 14, y, 10, rgb(135, 142, 160), "Gen   Births  Forage  Nav   Comb  Care   Neur  Syn   Eff", .{});
     y += 15;
     const total_recs = w.gen_record_count;
     const start_rec = total_recs -| 6;
@@ -670,15 +670,16 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
         const rec = w.gen_records[idx];
         if (rec.births == 0) continue;
         const b: f32 = @floatFromInt(rec.births);
-        text(px + 14, y, 11, rgb(205, 210, 225), "G{d:<4}  {d:<7}  {d:>3.0}%      {d:>3.0}%    {d:>3.0}%      {d:>3.0}%      {d:.2}    {d:.2}", .{
+        text(px + 14, y, 10, rgb(205, 210, 225), "G{d:<3}  {d:<5}   {d:>3.0}%   {d:>3.0}%  {d:>3.0}%  {d:>3.0}%   {d:>4.1}  {d:>4.0}  {d:.2}", .{
             rec.gen,
             rec.births,
             rec.skill_sum[0] / b * 100,
             rec.skill_sum[1] / b * 100,
             rec.skill_sum[2] / b * 100,
             rec.skill_sum[3] / b * 100,
+            rec.neuron_sum / b,
+            rec.synapse_sum / b,
             rec.trait_eff_sum / b,
-            rec.trait_adapt_sum / b,
         });
         y += 15;
     }
@@ -912,18 +913,75 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     }
 
     if (app.show_brain) {
-        y += 6;
+        y += 5;
+        const cog = &e.genome.cog;
+        text(x + 12, y, 11, rgb(235, 235, 245), "Cognitive brain ({d} neurons, {d} synapses, +{d} grown)", .{
+            cog.totalNeurons(), cog.activeSynapses(), cog.lifetime_rewires,
+        });
+        y += 14;
+        drawCognitiveGraph(cog, x + 12, y, 276, 54);
+        y += 58;
+
         const c = app.world.circuit;
-        text(x + 12, y, 12, rgb(235, 235, 245), "Fly neurons ({d} neurons, {d} synapses)", .{ c.neurons, c.connections() });
-        y += 15;
-        const cols: usize = 55;
-        const cell: f32 = 5;
+        text(x + 12, y, 11, rgb(235, 235, 245), "FlyWire brainstem ({d} neurons, {d} synapses)", .{ c.neurons, c.connections() });
+        y += 13;
+        const cols: usize = 68;
+        const cell: f32 = 4;
         for (e.brain.r, 0..) |r, i| {
             const cx = x + 12 + @as(f32, @floatFromInt(i % cols)) * cell;
             const cy = y + @as(f32, @floatFromInt(i / cols)) * cell;
             const v: u8 = @intFromFloat(std.math.clamp(r, 0, 1) * 255);
-            rl.DrawRectangleRec(rect(cx, cy, cell - 1, cell - 1), .{ .r = v, .g = @intFromFloat(@as(f32, @floatFromInt(v)) * 0.7), .b = 40 + v / 3, .a = 255 });
+            rl.DrawRectangleRec(rect(cx, cy, cell - 0.8, cell - 0.8), .{ .r = v, .g = @intFromFloat(@as(f32, @floatFromInt(v)) * 0.7), .b = 40 + v / 3, .a = 255 });
         }
+    }
+}
+
+fn drawCognitiveGraph(cog: *const gen.CognitiveBrain, x: f32, y: f32, w: f32, h: f32) void {
+    rl.DrawRectangleRec(rect(x, y, w, h), rgb(16, 18, 28));
+    var pos: [gen.max_cog_nodes]rl.Vector2 = undefined;
+    // Inputs on left column.
+    for (0..gen.social_inputs) |i| {
+        const t = (@as(f32, @floatFromInt(i)) + 0.5) / @as(f32, gen.social_inputs);
+        pos[i] = .{ .x = x + 10, .y = y + 3 + t * (h - 6) };
+    }
+    // Hidden neurons in middle columns (split across 2 columns when > 8).
+    const hc: usize = cog.hidden_count;
+    for (0..hc) |hi| {
+        const col_frac: f32 = if (hc <= 8) 0.5 else if (hi % 2 == 0) 0.38 else 0.62;
+        const per_col: f32 = if (hc <= 8) @floatFromInt(hc) else @floatFromInt((hc + 1) / 2);
+        const row: f32 = @floatFromInt(if (hc <= 8) hi else hi / 2);
+        const t = (row + 0.5) / @max(per_col, 1);
+        pos[gen.social_inputs + hi] = .{ .x = x + w * col_frac, .y = y + 4 + t * (h - 8) };
+    }
+    // Outputs on right column.
+    for (0..gen.social_outputs) |oi| {
+        const t = (@as(f32, @floatFromInt(oi)) + 0.5) / @as(f32, gen.social_outputs);
+        pos[gen.out_base + oi] = .{ .x = x + w - 10, .y = y + 5 + t * (h - 10) };
+    }
+
+    // Synapses: green = excitatory, red = inhibitory, brightness = strength.
+    for (cog.synapses[0..cog.synapse_count]) |s| {
+        if (!s.active) continue;
+        const mag = std.math.clamp(@abs(s.weight) / 2.0, 0.15, 1.0);
+        const alpha: u8 = @intFromFloat(mag * 145);
+        const col = if (s.weight >= 0) withAlpha(rgb(90, 225, 150), alpha) else withAlpha(rgb(245, 95, 95), alpha);
+        rl.DrawLineEx(pos[s.from], pos[s.to], 0.9 + 0.6 * mag, col);
+    }
+
+    // Nodes: brightness reflects live activation.
+    for (0..gen.social_inputs) |i| {
+        const a = std.math.clamp(@abs(cog.act[i]), 0, 1);
+        rl.DrawCircleV(pos[i], 2.0, rgb(80 + @as(u8, @intFromFloat(a * 160)), 110 + @as(u8, @intFromFloat(a * 130)), 170));
+    }
+    for (0..hc) |hi| {
+        const idx = gen.social_inputs + hi;
+        const a = std.math.clamp(@abs(cog.act[idx]), 0, 1);
+        rl.DrawCircleV(pos[idx], 3.0, rgb(95 + @as(u8, @intFromFloat(a * 155)), 195 + @as(u8, @intFromFloat(a * 55)), 190));
+    }
+    for (0..gen.social_outputs) |oi| {
+        const idx = gen.out_base + oi;
+        const a = std.math.clamp(@abs(cog.act[idx]), 0, 1);
+        rl.DrawCircleV(pos[idx], 3.2, withAlpha(actionColor(@fromBackingInt(@intCast(oi))), 110 + @as(u8, @intFromFloat(a * 145))));
     }
 }
 

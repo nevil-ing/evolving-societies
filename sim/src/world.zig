@@ -163,6 +163,8 @@ pub const GenRecord = struct {
     trait_eff_sum: f32 = 0,
     trait_aggr_sum: f32 = 0,
     trait_adapt_sum: f32 = 0,
+    neuron_sum: f32 = 0,
+    synapse_sum: f32 = 0,
 };
 pub const max_gen_records = 64;
 
@@ -738,6 +740,8 @@ pub const World = struct {
                     e.explore_target = null;
                     e.explore_timer = 3 + w.rng().float(f32) * 4;
                     e.addSkill(.navigation, 0.04);
+                    e.genome.cog.learn(0.25);
+                    if (w.rng().float(f32) < 0.25) _ = e.genome.cog.sproutFromExperience(w.rng());
                 } else if (e.odour < 0.25) {
                     // Gently steer toward the frontier waypoint while still letting the fly brain
                     // take over as soon as it picks up a real food scent or trail.
@@ -800,6 +804,8 @@ pub const World = struct {
                     e.food_eaten += gained;
                     e.since_meal = 0;
                     e.addSkill(.foraging, bite * 0.004);
+                    e.genome.cog.learn(gained * 0.06);
+                    if (w.rng().float(f32) < bite * 0.006) _ = e.genome.cog.sproutFromExperience(w.rng());
                 }
             }
         }
@@ -829,10 +835,13 @@ pub const World = struct {
         }
 
         // Metabolism, harsher in hard environments and during world storms; navigation skill lowers travel cost.
+        // Larger cognitive brains also carry a small real metabolic upkeep so only useful growth survives selection.
         const harsh = (if (soc.territory.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness();
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
-        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost) * (1 + 0.5 * harsh);
+        const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0003 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
+        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + brain_cost) * (1 + 0.5 * harsh);
         e.energy -= drain * dt;
+        if (e.energy < 25) e.genome.cog.learn(-0.08 * dt);
 
         // Combat (within physical reach); combat skill improves both offense and defense.
         if (e.action == .fight) {
@@ -845,10 +854,12 @@ pub const World = struct {
                     e.energy -= 3 * dt;
                     e.addSkill(.combat, dt * 0.05);
                     o.addSkill(.combat, dt * 0.03);
+                    o.genome.cog.learn(-dmg * 0.12);
                     w.field.deposit(alarmChannel(o.society), o.pos.x, o.pos.y, dmg * 0.6);
                     if (o.energy <= 0 and o.dead == null) {
                         e.kills += 1;
                         e.addSkill(.combat, 0.08);
+                        e.genome.cog.learn(0.6);
                         try w.kill(oi, .killed);
                     }
                 }
@@ -932,6 +943,7 @@ pub const World = struct {
             p.repro_cooldown = 10;
             p.children += 1;
             p.addSkill(.care, 0.05);
+            p.genome.cog.learn(0.8);
         }
     }
 
@@ -944,6 +956,8 @@ pub const World = struct {
         rec.trait_eff_sum += e.genome.trait(.efficiency);
         rec.trait_aggr_sum += e.genome.trait(.aggression);
         rec.trait_adapt_sum += e.genome.trait(.adaptability);
+        rec.neuron_sum += @floatFromInt(e.genome.cog.totalNeurons());
+        rec.synapse_sum += @floatFromInt(e.genome.cog.activeSynapses());
         if (idx + 1 > w.gen_record_count) w.gen_record_count = idx + 1;
     }
 
@@ -1183,6 +1197,8 @@ pub const World = struct {
             receiver.energy = @min(max_energy, receiver.energy + gift);
             receiver.since_meal = @min(receiver.since_meal, 4);
             donor.addSkill(.care, 0.06);
+            donor.genome.cog.learn(0.35);
+            receiver.genome.cog.learn(0.4);
             w.field.deposit(trailChannel(donor.society), mid.x, mid.y, 1.0);
             w.addContact(mid, .share_food, donor.society);
             return true;
