@@ -413,3 +413,35 @@ test "world: food call recruits distant hungry kin toward shared food" {
     // Recruited kin should have turned around and moved significantly closer to the shared food.
     try std.testing.expect(w.entities.items[1].pos.x < 120);
 }
+
+test "world: spawnClone preserves captured traits, skills, cognitive brain, and lineage" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 606);
+    const orig = &w.entities.items[0];
+    orig.generation = 7;
+    orig.lineage = 42;
+    orig.skills[@backingInt(sim.Skill.foraging)] = 0.77;
+    orig.genome.traits[@backingInt(gen.Trait.efficiency)] = 0.91;
+
+    const clone = try w.spawnClone(
+        orig.society,
+        .{ .x = 0, .y = 0 },
+        orig.genome.traits,
+        orig.genome.motor,
+        orig.genome.cog,
+        orig.genome.fly_gain,
+        orig.skills,
+        orig.generation,
+        orig.lineage,
+        true,
+    );
+    try std.testing.expectEqual(@as(u32, 7), clone.generation);
+    try std.testing.expectEqual(@as(u32, 42), clone.lineage);
+    try std.testing.expect(clone.hybrid);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.77), clone.skill(.foraging), 1e-5);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.91), clone.genome.trait(.efficiency), 1e-5);
+}

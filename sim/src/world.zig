@@ -154,7 +154,7 @@ pub fn phaseRemaining(time: f32) f32 {
     return cycle_length - t;
 }
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, world_bloom, world_storm };
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, world_bloom, world_storm };
 
 pub const WorldEvent = struct {
     time: f32,
@@ -317,6 +317,7 @@ pub const SocietyStats = struct {
     peak_pop: u32 = 25,
     status: SocietyStatus = .stable,
     had_hybrid: bool = false,
+    had_hybrid_majority: bool = false,
     boom_milestone: u32 = 50,
     gen_milestone: u32 = 3,
     extinct_time: ?f32 = null,
@@ -342,6 +343,7 @@ pub const World = struct {
     history_count: usize = 0,
     history_timer: f32 = 0,
     status_timer: f32 = 0,
+    clash_cooldown: f32 = 0,
     phase: WorldPhase = .calm,
     territories: [society_count]Rect = initTerritories(),
     events: [max_events]WorldEvent = undefined,
@@ -389,6 +391,7 @@ pub const World = struct {
         w.history_count = 0;
         w.history_timer = 0;
         w.status_timer = 0;
+        w.clash_cooldown = 0;
         w.phase = .calm;
         w.territories = initTerritories();
         w.event_count = 0;
@@ -475,6 +478,37 @@ pub const World = struct {
         });
         w.next_id += 1;
         return &w.entities.items[w.entities.items.len - 1];
+    }
+
+    /// Release a cloned specimen (e.g. from the Specimen Lab) into the world.
+    pub fn spawnClone(
+        w: *World,
+        society: u8,
+        pos: Vec2,
+        traits: [gen.trait_count]f32,
+        motor: [gen.motor_count]f32,
+        cog: gen.CognitiveBrain,
+        fly_gain: []const f32,
+        skills: [skill_count]f32,
+        generation: u32,
+        lineage: u32,
+        hybrid: bool,
+    ) !*Entity {
+        const g = gen.Genome{
+            .traits = traits,
+            .motor = motor,
+            .cog = cog,
+            .fly_gain = try w.gpa.dupe(f32, fly_gain),
+        };
+        const e = try w.addEntity(society, pos, g);
+        e.age = maturity_age + 5;
+        e.energy = 110;
+        e.skills = skills;
+        e.generation = generation;
+        e.lineage = if (lineage != 0) lineage else e.id;
+        e.hybrid = hybrid;
+        w.max_generation = @max(w.max_generation, generation);
+        return e;
     }
 
     fn free(gpa: std.mem.Allocator, e: Entity) void {
@@ -1229,6 +1263,36 @@ pub const World = struct {
             if (pop >= st.boom_milestone) {
                 w.pushEvent(@intCast(si), .boom, pop);
                 st.boom_milestone += 50;
+            }
+            if (!st.had_hybrid_majority and pop >= 10) {
+                var hyb: u32 = 0;
+                for (w.entities.items) |e| {
+                    if (e.dead == null and e.society == si and e.hybrid) hyb += 1;
+                }
+                if (hyb * 2 >= pop) {
+                    st.had_hybrid_majority = true;
+                    w.pushEvent(@intCast(si), .hybrid_majority, pop);
+                }
+            }
+        }
+
+        // Detect living territory border overlap between active societies.
+        if (w.clash_cooldown > 0) {
+            w.clash_cooldown = @max(0, w.clash_cooldown - 1.0);
+        } else {
+            outer: for (0..society_count) |a| {
+                if (w.stats[a].status == .extinct) continue;
+                for (a + 1..society_count) |b| {
+                    if (w.stats[b].status == .extinct) continue;
+                    const ra = w.territories[a];
+                    const rb = w.territories[b];
+                    const overlap = ra.x < rb.x + rb.w and ra.x + ra.w > rb.x and ra.y < rb.y + rb.h and ra.y + ra.h > rb.y;
+                    if (overlap) {
+                        w.pushEvent(@intCast(a), .territory_clash, @intCast(b));
+                        w.clash_cooldown = 90;
+                        break :outer;
+                    }
+                }
             }
         }
     }

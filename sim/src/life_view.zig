@@ -22,7 +22,30 @@ const newSeed = ui.newSeed;
 const Overlay = enum { trails, scent, off };
 const speeds = [_]u32{ 1, 2, 4, 8, 16 };
 
+const max_specimens = 16;
+
+const Specimen = struct {
+    id: u32,
+    society: u8,
+    generation: u32,
+    lineage: u32,
+    role: sim.Role,
+    hybrid: bool,
+    captured_at: f32,
+    age: f32,
+    children: u32,
+    kills: u32,
+    food_eaten: f32,
+    distance_traveled: f32,
+    traits: [gen.trait_count]f32,
+    motor: [gen.motor_count]f32,
+    skills: [sim.skill_count]f32,
+    cog: gen.CognitiveBrain,
+    fly_gain: []f32,
+};
+
 const App = struct {
+    gpa: std.mem.Allocator,
     world: World,
     logger: log.RunLogger,
     camera: rl.Camera2D,
@@ -34,9 +57,23 @@ const App = struct {
     show_brain: bool = true,
     show_key: bool = true,
     show_gens: bool = false,
+    show_lab: bool = false,
+    specimens: [max_specimens]Specimen = undefined,
+    specimen_count: usize = 0,
+    lab_active: usize = 0,
+    lab_compare: ?usize = null,
+    seen_events: usize = 0,
+    toasts: [4]Toast = undefined,
+    toast_count: usize = 0,
     field_tex: rl.Texture2D,
     field_px: []u8,
 };
+
+const Toast = struct {
+    ev: sim.WorldEvent,
+    age: f32 = 0,
+};
+const toast_duration: f32 = 7.0;
 
 pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
     const circuit = try fly.Circuit.parse(gpa, @embedFile("flybrain"));
@@ -46,13 +83,17 @@ pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
 
     const seed = opts.seed orelse newSeed();
     var app = App{
+        .gpa = gpa,
         .world = try World.init(gpa, &circuit, seed),
         .logger = if (shot == null) log.RunLogger.init(seed, opts.out) else .{},
         .camera = .{ .offset = .{ .x = 0, .y = 0 }, .target = .{ .x = 0, .y = 0 }, .rotation = 0, .zoom = 1 },
         .field_tex = undefined,
         .field_px = undefined,
     };
-    defer app.logger.deinit();
+    defer {
+        for (app.specimens[0..app.specimen_count]) |sp| gpa.free(sp.fly_gain);
+        app.logger.deinit();
+    }
     app.logger.logNow(&app.world);
     fitCamera(&app.camera);
     const f = &app.world.field;
@@ -82,11 +123,19 @@ pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
         };
         try input(&app);
         if (!app.paused) {
+            const prev_count = app.world.event_count;
+            const prev_last: ?sim.WorldEvent = if (prev_count > 0) app.world.events[prev_count - 1] else null;
             for (0..speeds[app.speed]) |_| {
                 try app.world.step(1.0 / 60.0);
                 app.logger.maybeLog(&app.world);
             }
+            if (app.world.event_count > 0) {
+                const newest = app.world.events[app.world.event_count - 1];
+                const is_new = app.world.event_count > prev_count or (prev_last != null and (newest.time != prev_last.?.time or newest.kind != prev_last.?.kind));
+                if (is_new) pushToast(&app, newest);
+            }
         }
+        ageToasts(&app, rl.GetFrameTime());
         if (app.selected) |id| {
             if (app.world.findById(id)) |e| {
                 if (app.follow) app.camera.target = .{ .x = e.pos.x, .y = e.pos.y };
@@ -217,7 +266,17 @@ fn input(app: *App) !void {
     if (rl.IsKeyPressed(rl.KEY_P)) cycleOverlay(app);
     if (rl.IsKeyPressed(rl.KEY_B)) app.show_brain = !app.show_brain;
     if (rl.IsKeyPressed(rl.KEY_L)) app.show_key = !app.show_key;
-    if (rl.IsKeyPressed(rl.KEY_G)) app.show_gens = !app.show_gens;
+    if (rl.IsKeyPressed(rl.KEY_G)) {
+        app.show_gens = !app.show_gens;
+        if (app.show_gens) app.show_lab = false;
+    }
+    if (rl.IsKeyPressed(rl.KEY_T)) {
+        app.show_lab = !app.show_lab;
+        if (app.show_lab) app.show_gens = false;
+    }
+    if (rl.IsKeyPressed(rl.KEY_S) and rl.IsKeyDown(rl.KEY_LEFT_SHIFT)) {
+        if (app.selected) |id| if (app.world.findById(id)) |e| try captureSpecimen(app, e);
+    }
     if (rl.IsKeyPressed(rl.KEY_C)) app.follow = !app.follow and app.selected != null;
     if (rl.IsKeyPressed(rl.KEY_R)) try restart(app);
     if (rl.IsKeyPressed(rl.KEY_ESCAPE)) {
@@ -537,7 +596,13 @@ fn drawHud(app: *App) !void {
     }
     drawHistory(w, px + 12, y + 4, 276, 100);
 
-    if (app.show_gens) drawGenerationsPanel(app, sw);
+    if (app.show_gens) {
+        drawGenerationsPanel(app, sw);
+    } else if (app.show_lab) {
+        try drawLabPanel(app, sw);
+    } else {
+        drawToasts(app, sw);
+    }
 
     // Legend / key below society panel.
     if (app.show_key) {
@@ -578,7 +643,7 @@ fn drawHud(app: *App) !void {
     }
     if (ui.button(rect(zx + 122, zy, 34, 30), " +", .{})) zoomBy(&app.camera, 1.25, null);
 
-    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G generations  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
+    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G history  T lab  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
     text(sw - 560, sh - 22, 11, rgb(100, 105, 120), "Fly circuit: FlyWire connectome v783 (Dorkenwald et al. 2024; Schlegel et al. 2024; Shiu et al. 2024)", .{});
 
     if (app.selected) |id| {
@@ -623,14 +688,274 @@ fn drawAlertBar(app: *App, sw: f32) void {
         text(bx + 28, 20, 12, rgb(225, 230, 240), "{s}", .{msg});
     } else {
         rl.DrawCircleV(.{ .x = bx + 16, .y = 28 }, 4.5, rgb(110, 210, 140));
-        text(bx + 28, 20, 12, rgb(175, 180, 195), "All societies active — press G for updates & generations", .{});
+        text(bx + 28, 20, 12, rgb(175, 180, 195), "All societies active - press G for history or T for Lab", .{});
+    }
+
+    const lab_btn = rect(bx + bw - 160, 17, 64, 22);
+    const lab_hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), lab_btn);
+    rl.DrawRectangleRounded(lab_btn, 0.35, 6, if (lab_hover) rgb(60, 68, 94) else rgb(36, 42, 60));
+    text(lab_btn.x + 8, lab_btn.y + 4, 11, rgb(140, 225, 215), "Lab {d}", .{app.specimen_count});
+    if (lab_hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
+        app.show_lab = !app.show_lab;
+        if (app.show_lab) app.show_gens = false;
     }
 
     const btn = rect(bx + bw - 92, 17, 84, 22);
     const hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), btn);
     rl.DrawRectangleRounded(btn, 0.35, 6, if (hover) rgb(60, 68, 94) else rgb(36, 42, 60));
     text(btn.x + 8, btn.y + 4, 11, rgb(215, 220, 235), "{s}", .{if (app.show_gens) "Hide G" else "History G"});
-    if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) app.show_gens = !app.show_gens;
+    if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) {
+        app.show_gens = !app.show_gens;
+        if (app.show_gens) app.show_lab = false;
+    }
+}
+
+fn pushToast(app: *App, ev: sim.WorldEvent) void {
+    if (app.toast_count < app.toasts.len) {
+        app.toasts[app.toast_count] = .{ .ev = ev };
+        app.toast_count += 1;
+    } else {
+        std.mem.copyForwards(Toast, app.toasts[0 .. app.toasts.len - 1], app.toasts[1..]);
+        app.toasts[app.toasts.len - 1] = .{ .ev = ev };
+    }
+}
+
+fn ageToasts(app: *App, dt: f32) void {
+    var i: usize = 0;
+    while (i < app.toast_count) {
+        app.toasts[i].age += dt;
+        if (app.toasts[i].age >= toast_duration) {
+            std.mem.copyForwards(Toast, app.toasts[i .. app.toast_count - 1], app.toasts[i + 1 .. app.toast_count]);
+            app.toast_count -= 1;
+            continue;
+        }
+        i += 1;
+    }
+}
+
+fn drawToasts(app: *const App, sw: f32) void {
+    if (app.toast_count == 0) return;
+    const tw: f32 = 420;
+    const tx = (sw - tw) * 0.5;
+    if (tx < 322) return;
+    var ty: f32 = 52;
+    var k = app.toast_count;
+    while (k > 0) {
+        k -= 1;
+        const t = app.toasts[k];
+        const fade = std.math.clamp((toast_duration - t.age) / 1.2, 0, 1);
+        const bg_a: u8 = @intFromFloat(fade * 225);
+        const fg_a: u8 = @intFromFloat(fade * 255);
+        const r = rect(tx, ty, tw, 28);
+        const col = eventColor(t.ev);
+        rl.DrawRectangleRounded(r, 0.2, 6, .{ .r = 20, .g = 24, .b = 36, .a = bg_a });
+        rl.DrawRectangleRoundedLinesEx(r, 0.2, 6, 1.2, withAlpha(col, @intFromFloat(fade * 170)));
+        rl.DrawCircleV(.{ .x = tx + 14, .y = ty + 14 }, 4.2, withAlpha(col, fg_a));
+        var buf: [128]u8 = undefined;
+        const msg = formatEvent(&buf, t.ev);
+        text(tx + 26, ty + 7, 12, withAlpha(rgb(235, 238, 248), fg_a), "{s}", .{msg});
+        ty += 34;
+    }
+}
+
+fn captureSpecimen(app: *App, e: *const sim.Entity) !void {
+    const sp = Specimen{
+        .id = e.id,
+        .society = e.society,
+        .generation = e.generation,
+        .lineage = e.lineage,
+        .role = e.role(),
+        .hybrid = e.hybrid,
+        .captured_at = app.world.time,
+        .age = e.age,
+        .children = e.children,
+        .kills = e.kills,
+        .food_eaten = e.food_eaten,
+        .distance_traveled = e.distance_traveled,
+        .traits = e.genome.traits,
+        .motor = e.genome.motor,
+        .skills = e.skills,
+        .cog = e.genome.cog,
+        .fly_gain = try app.gpa.dupe(f32, e.genome.fly_gain),
+    };
+    if (app.specimen_count < max_specimens) {
+        app.specimens[app.specimen_count] = sp;
+        app.lab_active = app.specimen_count;
+        app.specimen_count += 1;
+    } else {
+        app.gpa.free(app.specimens[0].fly_gain);
+        std.mem.copyForwards(Specimen, app.specimens[0 .. max_specimens - 1], app.specimens[1..]);
+        app.specimens[max_specimens - 1] = sp;
+        app.lab_active = max_specimens - 1;
+        if (app.lab_compare) |ci| app.lab_compare = if (ci > 0) ci - 1 else null;
+    }
+    app.show_lab = true;
+    app.show_gens = false;
+}
+
+fn drawLabPanel(app: *App, sw: f32) !void {
+    const pw: f32 = 540;
+    const px = (sw - pw) * 0.5;
+    if (px < 322) return;
+    const py: f32 = 52;
+    const ph: f32 = 468;
+    panel(px, py, pw, ph);
+
+    var y = py + 12;
+    text(px + 14, y, 15, rgb(235, 235, 245), "Specimen Lab - Capture, Compare & Experiment (T)", .{});
+    y += 24;
+
+    if (app.specimen_count == 0) {
+        text(px + 14, y + 10, 12, rgb(175, 180, 195), "No specimens captured yet.", .{});
+        text(px + 14, y + 32, 11, rgb(145, 150, 165), "Click any creature in the world and press Capture (or Shift+S) to save a snapshot.", .{});
+        text(px + 14, y + 50, 11, rgb(145, 150, 165), "Capture early founders and later descendants to compare evolution side-by-side,", .{});
+        text(px + 14, y + 68, 11, rgb(145, 150, 165), "tweak traits/skills, mutate cognitive brains, and release clones into the world.", .{});
+        return;
+    }
+
+    if (app.lab_active >= app.specimen_count) app.lab_active = app.specimen_count - 1;
+
+    // Specimen gallery tabs.
+    var gx = px + 14;
+    var gy = y;
+    for (app.specimens[0..app.specimen_count], 0..) |sp, idx| {
+        const bw: f32 = 82;
+        if (gx + bw > px + pw - 14) {
+            gx = px + 14;
+            gy += 24;
+        }
+        const r = rect(gx, gy, bw, 20);
+        const hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), r);
+        const is_active = idx == app.lab_active;
+        const is_cmp = app.lab_compare != null and app.lab_compare.? == idx;
+        const bg = if (is_active) rgb(58, 72, 108) else if (is_cmp) rgb(44, 72, 66) else if (hover) rgb(46, 52, 74) else rgb(28, 32, 46);
+        rl.DrawRectangleRounded(r, 0.35, 4, bg);
+        if (is_active or is_cmp) {
+            rl.DrawRectangleRoundedLinesEx(r, 0.35, 4, 1.2, if (is_active) rgb(140, 185, 255) else rgb(110, 230, 175));
+        }
+        text(r.x + 6, r.y + 3, 10, societyColor(sim.societies[sp.society]), "#{d} G{d}", .{ sp.id, sp.generation });
+        if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) app.lab_active = idx;
+        if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_RIGHT)) {
+            app.lab_compare = if (is_cmp) null else idx;
+        }
+        gx += bw + 6;
+    }
+    y = gy + 28;
+
+    const a = &app.specimens[app.lab_active];
+    const s = sim.societies[a.society];
+    text(px + 14, y, 16, societyColor(s), "{s} #{d}  (Gen {d}, {s})", .{ s.name, a.id, a.generation, @tagName(a.role) });
+    text(px + 14, y + 20, 11, rgb(175, 180, 195), "lineage #{d}  kids {d}  kills {d}  food {d:.0}  travel {d:.0}u  brain {d}n/{d}s", .{
+        a.lineage, a.children, a.kills, a.food_eaten, a.distance_traveled, a.cog.totalNeurons(), a.cog.activeSynapses(),
+    });
+
+    // Action buttons for active specimen: Compare, Mutate, Release Clone.
+    const cmp_r = rect(px + pw - 262, y, 76, 22);
+    const mut_r = rect(px + pw - 180, y, 72, 22);
+    const rel_r = rect(px + pw - 102, y, 88, 22);
+    if (smallBtn(cmp_r, if (app.lab_compare != null) "Clear Cmp" else "Pin Cmp", rgb(44, 68, 66))) {
+        app.lab_compare = if (app.lab_compare != null) null else app.lab_active;
+    }
+    if (smallBtn(mut_r, "Mutate", rgb(76, 48, 92))) {
+        const rng = app.world.prng.random();
+        for (&a.traits) |*tv| tv.* = std.math.clamp(tv.* + rng.floatNorm(f32) * 0.12, 0, 1);
+        _ = a.cog.addRandomSynapse(rng);
+        if (rng.boolean()) _ = a.cog.addNeuron(rng);
+    }
+    if (smallBtn(rel_r, "Release", rgb(34, 82, 54))) {
+        const home = app.world.territories[a.society].center();
+        const spawned = try app.world.spawnClone(
+            a.society,
+            home,
+            a.traits,
+            a.motor,
+            a.cog,
+            a.fly_gain,
+            a.skills,
+            a.generation,
+            a.lineage,
+            a.hybrid,
+        );
+        app.selected = spawned.id;
+    }
+    y += 42;
+
+    const cmp: ?*const Specimen = if (app.lab_compare) |ci| (if (ci < app.specimen_count and ci != app.lab_active) &app.specimens[ci] else null) else null;
+    if (cmp) |b| {
+        text(px + 14, y, 11, rgb(115, 225, 185), "Comparing #{d} (G{d}) vs baseline #{d} (G{d}) - right-click any tab to switch", .{
+            a.id, a.generation, b.id, b.generation,
+        });
+        y += 18;
+    } else {
+        text(px + 14, y, 11, rgb(140, 148, 165), "Use -/+ to tune features before clicking Release. Right-click another tab to compare.", .{});
+        y += 18;
+    }
+
+    // Left column: Genes (with live -/+ tweakers and optional comparison delta).
+    const col1_x = px + 14;
+    const col2_x = px + 280;
+    var y1 = y;
+    text(col1_x, y1, 12, rgb(225, 225, 238), "Genes", .{});
+    y1 += 17;
+    for (&a.traits, 0..) |*tv, i| {
+        const name = @tagName(@as(gen.Trait, @fromBackingInt(@intCast(i))));
+        text(col1_x, y1 + 1, 11, rgb(175, 180, 195), "{s}", .{name});
+        rl.DrawRectangleRec(rect(col1_x + 86, y1 + 4, 84, 7), rgb(34, 38, 52));
+        rl.DrawRectangleRec(rect(col1_x + 86, y1 + 4, 84 * std.math.clamp(tv.*, 0, 1), 7), rgb(180, 160, 255));
+        if (smallBtn(rect(col1_x + 174, y1 - 1, 18, 15), "-", rgb(42, 46, 64))) tv.* = std.math.clamp(tv.* - 0.1, 0, 1);
+        if (smallBtn(rect(col1_x + 194, y1 - 1, 18, 15), "+", rgb(42, 46, 64))) tv.* = std.math.clamp(tv.* + 0.1, 0, 1);
+        if (cmp) |b| {
+            const delta = tv.* - b.traits[i];
+            const dc = if (delta > 0.01) rgb(110, 235, 150) else if (delta < -0.01) rgb(250, 110, 100) else rgb(140, 145, 160);
+            const sign: []const u8 = if (delta >= 0) "+" else "";
+            text(col1_x + 216, y1 + 1, 10, dc, "{s}{d:.2}", .{ sign, delta });
+        } else {
+            text(col1_x + 216, y1 + 1, 10, rgb(155, 160, 175), "{d:.2}", .{tv.*});
+        }
+        y1 += 19;
+    }
+
+    // Right column: Learned skills + Cognitive brain graph.
+    var y2 = y;
+    text(col2_x, y2, 12, rgb(225, 225, 238), "Learned skills", .{});
+    y2 += 17;
+    for (&a.skills, 0..) |*sv, i| {
+        const name = @tagName(@as(sim.Skill, @fromBackingInt(@intCast(i))));
+        text(col2_x, y2 + 1, 11, rgb(175, 180, 195), "{s}", .{name});
+        rl.DrawRectangleRec(rect(col2_x + 76, y2 + 4, 82, 7), rgb(34, 38, 52));
+        rl.DrawRectangleRec(rect(col2_x + 76, y2 + 4, 82 * std.math.clamp(sv.*, 0, 1), 7), rgb(95, 220, 195));
+        if (smallBtn(rect(col2_x + 162, y2 - 1, 18, 15), "-", rgb(42, 46, 64))) sv.* = std.math.clamp(sv.* - 0.1, 0, 1);
+        if (smallBtn(rect(col2_x + 182, y2 - 1, 18, 15), "+", rgb(42, 46, 64))) sv.* = std.math.clamp(sv.* + 0.1, 0, 1);
+        if (cmp) |b| {
+            const delta = (sv.* - b.skills[i]) * 100;
+            const dc = if (delta > 1) rgb(110, 235, 150) else if (delta < -1) rgb(250, 110, 100) else rgb(140, 145, 160);
+            const sign: []const u8 = if (delta >= 0) "+" else "";
+            text(col2_x + 204, y2 + 1, 10, dc, "{s}{d:.0}%", .{ sign, delta });
+        } else {
+            text(col2_x + 204, y2 + 1, 10, rgb(155, 160, 175), "{d:.0}%", .{sv.* * 100});
+        }
+        y2 += 19;
+    }
+
+    y2 += 10;
+    text(col2_x, y2, 11, rgb(225, 225, 238), "Cognitive brain ({d}n, {d}s)", .{ a.cog.totalNeurons(), a.cog.activeSynapses() });
+    y2 += 15;
+    drawCognitiveGraph(&a.cog, col2_x, y2, 246, 72);
+    if (cmp) |b| {
+        const dn: i32 = @as(i32, @intCast(a.cog.totalNeurons())) - @as(i32, @intCast(b.cog.totalNeurons()));
+        const ds: i32 = @as(i32, @intCast(a.cog.activeSynapses())) - @as(i32, @intCast(b.cog.activeSynapses()));
+        const sn: []const u8 = if (dn >= 0) "+" else "";
+        const ss: []const u8 = if (ds >= 0) "+" else "";
+        text(col2_x, y2 + 76, 10, rgb(165, 210, 235), "vs baseline: {s}{d} neurons, {s}{d} synapses", .{ sn, dn, ss, ds });
+    }
+}
+
+fn smallBtn(r: rl.Rectangle, label: []const u8, base_col: rl.Color) bool {
+    const hover = rl.CheckCollisionPointRec(rl.GetMousePosition(), r);
+    const col = if (hover) rgb(@min(255, @as(u16, base_col.r) + 22), @min(255, @as(u16, base_col.g) + 22), @min(255, @as(u16, base_col.b) + 22)) else base_col;
+    rl.DrawRectangleRounded(r, 0.35, 4, col);
+    text(r.x + 5, r.y + 2, 10, rgb(230, 235, 245), "{s}", .{label});
+    return hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT);
 }
 
 fn drawGenerationsPanel(app: *App, sw: f32) void {
@@ -745,18 +1070,20 @@ fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
         .boom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} booming ({d} population)", .{ mins, secs, name, ev.value }),
         .milestone_gen => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} reached Generation {d}", .{ mins, secs, name, ev.value }),
         .first_hybrid => std.fmt.bufPrint(buf, "{d}:{d:0>2}  First {s} hybrid born (Gen {d})", .{ mins, secs, name, ev.value }),
-        .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom — abundant food growth", .{ mins, secs }),
+        .hybrid_majority => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Hybrids now lead {s} ({d} pop)", .{ mins, secs, name, ev.value }),
+        .territory_clash => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} & {s} contesting territory!", .{ mins, secs, name, sim.societies[@min(ev.value, sim.society_count - 1)].name }),
+        .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom - abundant food growth", .{ mins, secs }),
         .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
 }
 
 fn eventColor(ev: sim.WorldEvent) rl.Color {
     return switch (ev.kind) {
-        .endangered => rgb(250, 185, 70),
+        .endangered, .territory_clash => rgb(250, 185, 70),
         .critical, .extinct => rgb(255, 85, 75),
         .recovered, .boom, .world_bloom => rgb(100, 235, 145),
         .milestone_gen => societyColor(sim.societies[ev.society]),
-        .first_hybrid => rgb(255, 220, 70),
+        .first_hybrid, .hybrid_majority => rgb(255, 220, 70),
         .world_storm => rgb(175, 155, 255),
     };
 }
@@ -900,8 +1227,9 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     panel(x, y, 300, h);
     y += 8;
     text(x + 12, y, 17, societyColor(s), "{s} #{d}", .{ s.name, e.id });
-    text(x + 136, y + 3, 12, rgb(170, 210, 240), "{s}", .{@tagName(e.role())});
-    if (e.hybrid) text(x + 218, y + 3, 12, rgb(255, 220, 60), "HYBRID", .{});
+    text(x + 128, y + 3, 12, rgb(170, 210, 240), "{s}", .{@tagName(e.role())});
+    if (smallBtn(rect(x + 232, y + 1, 56, 17), "Capture", rgb(44, 68, 86))) try captureSpecimen(app, e);
+    if (e.hybrid) text(x + 184, y + 3, 11, rgb(255, 220, 60), "HYB", .{});
     y += 22;
     text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lin #{d}  age {d:.1}/{d:.0}m  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age / 60, e.lifespan / 60, e.children, e.kills });
     y += 15;
