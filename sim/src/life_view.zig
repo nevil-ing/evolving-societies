@@ -58,6 +58,7 @@ const App = struct {
     follow: bool = false,
     show_brain: bool = true,
     show_key: bool = true,
+    show_territories: bool = true,
     show_gens: bool = false,
     show_lab: bool = false,
     show_exp: bool = false,
@@ -271,6 +272,7 @@ fn input(app: *App) !void {
     if (rl.IsKeyPressed(rl.KEY_P)) cycleOverlay(app);
     if (rl.IsKeyPressed(rl.KEY_B)) app.show_brain = !app.show_brain;
     if (rl.IsKeyPressed(rl.KEY_L)) app.show_key = !app.show_key;
+    if (rl.IsKeyPressed(rl.KEY_H)) app.show_territories = !app.show_territories;
     if (rl.IsKeyPressed(rl.KEY_G)) {
         app.show_gens = !app.show_gens;
         if (app.show_gens) {
@@ -392,14 +394,30 @@ fn drawWorld(app: *App) void {
     while (gy < b.y + b.h) : (gy += 200) {
         rl.DrawLineEx(.{ .x = b.x, .y = gy }, .{ .x = b.x + b.w, .y = gy }, 1 / zoom, grid_col);
     }
-    for (sim.societies, 0..) |s, si| {
-        const t = w.territories[si];
-        const col = societyColor(s);
-        const alive = w.stats[si].status != .extinct;
-        rl.DrawRectangleRec(rect(t.x, t.y, t.w, t.h), withAlpha(col, if (alive) 18 else 6));
-        rl.DrawRectangleLinesEx(rect(t.x, t.y, t.w, t.h), 2 / zoom, withAlpha(col, if (alive) 90 else 30));
-        text(t.x + 10, t.y + 10, 28, withAlpha(col, if (alive) 150 else 55), "{s}", .{s.name});
-        text(t.x + 10, t.y + 42, 16, withAlpha(rgb(200, 200, 210), if (alive) 120 else 45), "{s}", .{s.environment});
+    if (app.show_territories) {
+        for (sim.societies, 0..) |s, si| {
+            const t = w.territories[si];
+            const col = societyColor(s);
+            const alive = w.stats[si].status != .extinct;
+            const ccol = withAlpha(col, if (alive) 70 else 25);
+            const thick = 1.2 / @max(zoom, 0.45);
+            const arm: f32 = 26;
+            const x0 = t.x;
+            const y0 = t.y;
+            const x1 = t.x + t.w;
+            const y1 = t.y + t.h;
+            // Clean corner brackets only (zero muddy interior fill) so creatures & structures stay 100% clear.
+            rl.DrawLineEx(.{ .x = x0, .y = y0 }, .{ .x = x0 + arm, .y = y0 }, thick, ccol);
+            rl.DrawLineEx(.{ .x = x0, .y = y0 }, .{ .x = x0, .y = y0 + arm }, thick, ccol);
+            rl.DrawLineEx(.{ .x = x1, .y = y0 }, .{ .x = x1 - arm, .y = y0 }, thick, ccol);
+            rl.DrawLineEx(.{ .x = x1, .y = y0 }, .{ .x = x1, .y = y0 + arm }, thick, ccol);
+            rl.DrawLineEx(.{ .x = x0, .y = y1 }, .{ .x = x0 + arm, .y = y1 }, thick, ccol);
+            rl.DrawLineEx(.{ .x = x0, .y = y1 }, .{ .x = x0, .y = y1 - arm }, thick, ccol);
+            rl.DrawLineEx(.{ .x = x1, .y = y1 }, .{ .x = x1 - arm, .y = y1 }, thick, ccol);
+            rl.DrawLineEx(.{ .x = x1, .y = y1 }, .{ .x = x1, .y = y1 - arm }, thick, ccol);
+            text(x0 + 8, y0 + 6, 17, withAlpha(col, if (alive) 105 else 40), "{s}", .{s.name});
+            text(x0 + 8, y0 + 25, 11, withAlpha(rgb(190, 195, 210), if (alive) 65 else 25), "{s}", .{s.environment});
+        }
     }
 
     if (app.overlay != .off) {
@@ -799,7 +817,7 @@ fn drawHud(app: *App) !void {
     }
     if (ui.button(rect(zx + 122, zy, 34, 30), " +", .{})) zoomBy(&app.camera, 1.25, null);
 
-    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G history  T lab  E controls  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
+    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G history  T lab  E controls  H borders  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
     text(sw - 560, sh - 22, 11, rgb(100, 105, 120), "Fly circuit: FlyWire connectome v783 (Dorkenwald et al. 2024; Schlegel et al. 2024; Shiu et al. 2024)", .{});
 
     if (app.selected) |id| {
