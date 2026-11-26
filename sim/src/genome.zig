@@ -28,12 +28,12 @@ pub const MotorGene = enum(u8) {
 pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 
 /// Growing, recurrent cognitive network node layout:
-///   0 .. social_inputs-1                            : sensory, state, memory, acoustic ears, kinship, health & egocentric bearings
+///   0 .. social_inputs-1                            : sensory, state, memory, acoustic ears, kinship, health, cargo & egocentric bearings
 ///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable leaky recurrent hidden neurons
-///   out_base .. out_base+action_outputs-1           : 8 discrete action outputs
-///   out_base+8 .. out_base+14                       : 7 continuous cortical outputs (turn, speed, mod, call_vol, call_f0..f2)
-pub const social_inputs = 35;
-pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
+///   out_base .. out_base+action_outputs-1           : 9 discrete action outputs (incl. unscripted offer/trade)
+///   out_base+9 .. out_base+15                       : 7 continuous cortical outputs (turn, speed, mod, call_vol, call_f0..f2)
+pub const social_inputs = 36;
+pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build, offer };
 pub const action_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
 pub const motor_outputs = 7; // turn_out, speed_out, mod_out, call_out (vol), call_f[0..3]
 pub const social_outputs = action_outputs + motor_outputs;

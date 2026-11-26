@@ -90,6 +90,11 @@ def main():
                 f"  Immunity: disease_deaths={end['disease_deaths']} | sick_now={end['sick_now']} "
                 f"| cleared={end['infections_cleared']} | avg_antibodies={f(last, 'avg_antibodies'):.2f}/4"
             )
+        if "gifts_given" in end:
+            print(
+                f"  Economy: gifts_given={end['gifts_given']} | reciprocal_trades={end['reciprocal_trades']} "
+                f"| cross_clade_trades={end['cross_clade_trades']}"
+            )
         print(
             f"  Spatial & storm response: outside_home={f(last, 'outside_home_frac')*100:.0f}% | "
             f"huddling calm={calm_hud*100:.0f}% vs storm={storm_hud*100:.0f}%"

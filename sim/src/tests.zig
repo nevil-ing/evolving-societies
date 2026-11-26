@@ -310,10 +310,10 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
     // Run a decision then apply positive reward: weights, predictor, continuous outputs, and dopamine should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0, 0, 0, 0, 0.6, 0.2, 0, 0 });
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0, 0, 0, 0, 0.6, 0.2, 0, 0, 0 });
     try std.testing.expect(@abs(brain.call_out) <= 1.0);
     // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
-    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     var hidden_mag: f32 = 0;
     for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
     try std.testing.expect(hidden_mag > 1e-3);
@@ -1301,4 +1301,68 @@ test "stage C: juvenile observational imitation transfers crafting and decayed s
     // Watching juvenile imitated the elder's build action & gained observational building intuition!
     try std.testing.expect(w.entities.items[1].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.build)] > youth_build_before);
     try std.testing.expect(w.entities.items[1].skill(.building) > youth_skill_before);
+}
+
+test "stage D: emergent offer transfers herbs and food at c/b <= 0.30, detects cross-clade barter, and penalizes defection" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 202605);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    w.structures.clearRetainingCapacity();
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    // Two adults from DIFFERENT clades (Triangle carrying medicinal herb, Circle sick & carrying a food_pack).
+    const a = &w.entities.items[0];
+    a.society = 0;
+    a.age = sim.maturity_age + 30;
+    a.energy = 80;
+    a.pos = .{ .x = 0, .y = 0 };
+    a.carrying = .herb;
+    a.action_timer = 0.08;
+    a.genome.cog.synapse_count = 0;
+    a.genome.cog.bias = @splat(0);
+    a.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.offer)] = 5.0;
+
+    const b = &w.entities.items[1];
+    b.society = 1;
+    b.age = sim.maturity_age + 30;
+    b.energy = 80;
+    b.pos = .{ .x = 22, .y = 0 };
+    b.carrying = .food_pack;
+    b.action_timer = 0.16; // B reciprocates shortly AFTER A heals B!
+    b.genome.cog.synapse_count = 0;
+    b.genome.cog.bias = @splat(0);
+    b.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.offer)] = 5.0;
+    b.infection = .{ .strain_id = 9, .sig = .{ 1, 2, 3, 4, 5, 6, 7, 8 }, .load = 0.60, .virulence = 0.40, .transmissibility = 0.50 };
+
+    const a_e_before = a.energy;
+    for (0..30) |_| {
+        w.entities.items[0].pos = .{ .x = 0, .y = 0 };
+        w.entities.items[1].pos = .{ .x = 22, .y = 0 };
+        try w.step(1.0 / 60.0);
+    }
+
+    // A handed its medicinal herb to sick B (healing B's load & giving herb_boost);
+    // B reciprocated by handing its food_pack to A (+28 energy at tiny cost -> net gain for A)!
+    try std.testing.expectEqual(sim.CarryItem.none, w.entities.items[0].carrying);
+    try std.testing.expectEqual(sim.CarryItem.none, w.entities.items[1].carrying);
+    try std.testing.expect(w.entities.items[1].herb_boost > 0);
+    try std.testing.expect(w.entities.items[0].energy > a_e_before + 10.0);
+    try std.testing.expect(w.stats[0].gifts_given >= 1);
+    try std.testing.expect(w.stats[1].gifts_given >= 1);
+    try std.testing.expect(w.stats[1].reciprocal_trades >= 1);
+    try std.testing.expect(w.stats[1].cross_clade_trades >= 1);
+    try std.testing.expect(w.trade_arc_count >= 1);
+    // Mutual trust rose strongly through reciprocal exchange!
+    try std.testing.expect(w.entities.items[0].trustOf(w.entities.items[1].id) > 0.25);
+    try std.testing.expect(w.entities.items[1].trustOf(w.entities.items[0].id) > 0.25);
 }

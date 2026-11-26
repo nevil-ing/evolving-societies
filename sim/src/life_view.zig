@@ -603,6 +603,17 @@ fn drawWorld(app: *App) void {
         if (t > 0.15) rl.DrawCircleLinesV(v2(sig.pos), r * 0.72, withAlpha(col, alpha / 2));
     }
 
+    // Transient glowing gold-cyan gift & barter transfer arcs!
+    for (w.trade_arcs[0..w.trade_arc_count]) |arc| {
+        const t = std.math.clamp(arc.age / sim.trade_arc_duration, 0, 1);
+        const alpha: u8 = @intFromFloat((1 - t) * 225);
+        const col = if (arc.reciprocal) rgb(255, 220, 85) else if (arc.item == 4) rgb(210, 145, 255) else rgb(95, 235, 225);
+        rl.DrawLineEx(v2(arc.from), v2(arc.to), (if (arc.reciprocal) @as(f32, 2.4) else 1.5) / @max(zoom, 0.5), withAlpha(col, alpha));
+        const bx = arc.from.x + (arc.to.x - arc.from.x) * t;
+        const by = arc.from.y + (arc.to.y - arc.from.y) * t;
+        rl.DrawCircleV(.{ .x = bx, .y = by }, if (arc.reciprocal) 3.4 else 2.5, withAlpha(col, alpha));
+    }
+
     if (w.phase == .storm) {
         // Subtle drifting wind streaks across the world during storm waves.
         const streak_col = withAlpha(rgb(155, 195, 255), 42);
@@ -713,12 +724,18 @@ fn drawEntity(w: *const World, e: *const sim.Entity, zoom: f32, selected: bool) 
         rl.DrawCircleLinesV(c, size + 2.4, withAlpha(rgb(215, 225, 245), 115));
     }
     if (e.feeding) rl.DrawCircleV(.{ .x = c.x + size * @cos(e.heading), .y = c.y + size * @sin(e.heading) }, 2, rgb(255, 255, 255));
-    // Visible carried materials & crafted tools (Spear / Basket).
+    // Visible carried materials, food packs, medicinal herbs & crafted tools (Spear / Basket).
     if (e.carrying != .none) {
-        const carry_col = if (e.carrying == .wood) rgb(186, 130, 74) else rgb(175, 188, 208);
+        const carry_col: rl.Color = switch (e.carrying) {
+            .wood => rgb(186, 130, 74),
+            .stone => rgb(175, 188, 208),
+            .food_pack => rgb(255, 225, 85),
+            .herb => rgb(205, 125, 255),
+            .none => rgb(200, 200, 200),
+        };
         const sx = c.x + size * 0.9 * @cos(e.heading + 0.9);
         const sy = c.y + size * 0.9 * @sin(e.heading + 0.9);
-        rl.DrawCircleV(.{ .x = sx, .y = sy }, 2.6, carry_col);
+        rl.DrawCircleV(.{ .x = sx, .y = sy }, 2.7, carry_col);
     }
     if (e.tool == .spear) {
         const tip = rl.Vector2{ .x = c.x + (size + 9) * @cos(e.heading), .y = c.y + (size + 9) * @sin(e.heading) };
@@ -1582,6 +1599,7 @@ fn formatEvent(w: *const World, buf: []u8, ev: sim.WorldEvent) []const u8 {
         .cache_raided => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} raided a {s} food cache!", .{ mins, secs, w.clades[@min(ev.value, w.clade_count - 1)].name(), name }),
         .species_diverged => std.fmt.bufPrint(buf, "{d}:{d:0>2}  New species diverged: {s} (Gen {d})!", .{ mins, secs, name, ev.value }),
         .outbreak => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Disease outbreak in {s} (strain #{d})!", .{ mins, secs, name, ev.value }),
+        .trade_emerged => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Reciprocal trade emerged in {s} ({d} exchanges)!", .{ mins, secs, name, ev.value }),
         .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom - abundant food growth", .{ mins, secs }),
         .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
@@ -1595,6 +1613,7 @@ fn eventColor(w: *const World, ev: sim.WorldEvent) rl.Color {
         .tool_discovered, .building_discovered, .predator_slain => rgb(110, 230, 235),
         .species_diverged => rgb(90, 245, 220),
         .outbreak => rgb(185, 235, 75),
+        .trade_emerged => rgb(255, 215, 95),
         .recovered, .boom, .world_bloom => rgb(100, 235, 145),
         .milestone_gen => cladeColor(w.clades[@min(ev.society, w.clade_count - 1)]),
         .first_hybrid, .hybrid_majority => rgb(255, 220, 70),
@@ -2024,6 +2043,7 @@ fn actionColor(a: gen.SocialAction) rl.Color {
         .gather => rgb(195, 150, 95),
         .craft_tool => rgb(140, 235, 235),
         .build => rgb(145, 225, 130),
+        .offer => rgb(255, 215, 95),
     };
 }
 

@@ -68,7 +68,7 @@ pub const RunLogger = struct {
                 "avg_foraging,avg_navigation,avg_combat,avg_care,avg_building,avg_toolcraft," ++
                 "avg_neurons,avg_synapses,outside_home_frac,huddled_frac,active_lineages," ++
                 "foragers,scouts,guards,caretakers,builders,hunters,elders," ++
-                "signals_sent,signals_acted,cannibal_kills,tools_held,structures_built,prey_hunted,predators_slain,raids_suffered,avg_recurrent,avg_memories,vocal_f0,vocal_f1,vocal_f2,vocal_sep,avg_digest_m,avg_digest_p,avg_digest_x,avg_scale,active_clades,disease_deaths,sick_now,infections_cleared,avg_antibodies\n",
+                "signals_sent,signals_acted,cannibal_kills,tools_held,structures_built,prey_hunted,predators_slain,raids_suffered,avg_recurrent,avg_memories,vocal_f0,vocal_f1,vocal_f2,vocal_sep,avg_digest_m,avg_digest_p,avg_digest_x,avg_scale,active_clades,disease_deaths,sick_now,infections_cleared,avg_antibodies,gifts_given,reciprocal_trades,cross_clade_trades\n",
         );
         return self;
     }
@@ -225,7 +225,7 @@ pub const RunLogger = struct {
 
             const s3 = std.fmt.bufPrint(
                 &line,
-                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d},{d},{d},{d},{d:.2}\n",
+                "{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d:.3},{d},{d},{d},{d},{d:.2},{d},{d},{d}\n",
                 .{
                     st.vocal_mean[0],
                     st.vocal_mean[1],
@@ -240,6 +240,9 @@ pub const RunLogger = struct {
                     sick_now,
                     st.infections_cleared,
                     ab_sum / d,
+                    st.gifts_given,
+                    st.reciprocal_trades,
+                    st.cross_clade_trades,
                 },
             ) catch continue;
             self.writeAll(s3);

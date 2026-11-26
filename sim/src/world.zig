@@ -224,7 +224,7 @@ pub const Material = struct {
     amount: f32,
 };
 
-pub const CarryItem = enum(u8) { none, wood, stone };
+pub const CarryItem = enum(u8) { none, wood, stone, food_pack, herb };
 pub const ToolKind = enum(u8) { none, spear, basket };
 
 pub const StructureKind = enum(u8) { shelter, cache };
@@ -296,8 +296,19 @@ pub const max_memories = 6;
 pub const SocialBond = struct {
     other_id: u32 = 0,
     trust: f32 = 0, // -1 (distrusted attacker) .. +1 (trusted ally)
+    last_received_at: f32 = -999, // world time when other_id last gifted/offered to us
+    last_received_item: u8 = 0, // item code received from other_id (for cross-item barter detection)
 };
 pub const max_bonds = 4;
+
+pub const TradeArc = struct {
+    from: Vec2,
+    to: Vec2,
+    item: u8, // 0=energy/food, 1=wood, 2=stone, 3=food_pack, 4=herb
+    reciprocal: bool = false,
+    age: f32 = 0,
+};
+pub const trade_arc_duration: f32 = 1.25;
 
 pub const SocietyStatus = enum(u8) { thriving, stable, struggling, endangered, extinct };
 
@@ -330,7 +341,7 @@ pub fn phaseRemaining(time: f32) f32 {
     return cycle_length - t;
 }
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, predator_slain, cache_raided, world_bloom, world_storm, species_diverged, outbreak };
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, predator_slain, cache_raided, world_bloom, world_storm, species_diverged, outbreak, trade_emerged };
 
 pub const Antibody = struct {
     strain_id: u32 = 0,
@@ -448,6 +459,7 @@ pub const Entity = struct {
     tool: ToolKind = .none,
     tool_durability: f32 = 0,
     craft_cooldown: f32 = 0,
+    offer_cooldown: f32 = 0,
     memories: [max_memories]Memory = @splat(.{}),
     bonds: [max_bonds]SocialBond = @splat(.{}),
     recalling: ?MemoryKind = null,
@@ -456,6 +468,8 @@ pub const Entity = struct {
     infection: ?Infection = null,
     herb_boost: f32 = 0, // active medicinal-herb immune boost timer (3x antibody synthesis)
     nearest_sickness: f32 = 0, // perceived sickness load of nearest creature (enables quarantine!)
+    nearest_carrying: f32 = 0, // perceived cargo of nearest creature (0=none, 0.33=mat, 0.66=food, 1=herb)
+    near_herb: ?u32 = null, // nearby medicinal herb resource for gathering/trade
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
@@ -601,6 +615,43 @@ pub const Entity = struct {
             e.bonds[slot] = .{ .other_id = other_id, .trust = std.math.clamp(delta, -1, 1) };
         }
     }
+    pub fn recordGiftFrom(e: *Entity, other_id: u32, now: f32, item_code: u8, trust_delta: f32) void {
+        if (other_id == 0 or other_id == e.id) return;
+        for (&e.bonds) |*b| {
+            if (b.other_id == other_id) {
+                b.trust = std.math.clamp(b.trust + trust_delta, -1, 1);
+                b.last_received_at = now;
+                b.last_received_item = item_code;
+                return;
+            }
+        }
+        var slot: usize = 0;
+        var weakest: f32 = 2.0;
+        for (e.bonds, 0..) |b, idx| {
+            if (b.other_id == 0) {
+                slot = idx;
+                break;
+            }
+            if (@abs(b.trust) < weakest) {
+                weakest = @abs(b.trust);
+                slot = idx;
+            }
+        }
+        e.bonds[slot] = .{
+            .other_id = other_id,
+            .trust = std.math.clamp(trust_delta, -1, 1),
+            .last_received_at = now,
+            .last_received_item = item_code,
+        };
+    }
+    pub fn recentGiftFrom(e: *const Entity, other_id: u32, now: f32) ?u8 {
+        for (e.bonds) |b| {
+            if (b.other_id == other_id and now - b.last_received_at <= 45.0 and now >= b.last_received_at) {
+                return b.last_received_item;
+            }
+        }
+        return null;
+    }
     pub fn trustOf(e: *const Entity, other_id: u32) f32 {
         for (e.bonds) |b| if (b.other_id == other_id) return b.trust;
         return 0;
@@ -705,6 +756,10 @@ pub const SocietyStats = struct {
     raids_suffered: u32 = 0,
     infections_cleared: u32 = 0,
     outbreaks_seen: u32 = 0,
+    gifts_given: u32 = 0,
+    reciprocal_trades: u32 = 0,
+    cross_clade_trades: u32 = 0,
+    had_trade: bool = false,
     discovered_tools: bool = false,
     discovered_building: bool = false,
     /// Emergent language & dialect telemetry (observation only, never fed back as scripted rules).
@@ -775,6 +830,8 @@ pub const World = struct {
     contact_count: usize = 0,
     signals: [48]Signal = undefined,
     signal_count: usize = 0,
+    trade_arcs: [32]TradeArc = undefined,
+    trade_arc_count: usize = 0,
     grid_head: [grid_cells]i32 = @splat(-1),
     grid_next: std.ArrayList(i32) = .empty,
     threads: usize,
@@ -842,6 +899,7 @@ pub const World = struct {
         w.gen_record_count = 0;
         w.contact_count = 0;
         w.signal_count = 0;
+        w.trade_arc_count = 0;
         try w.populate();
     }
 
@@ -1410,6 +1468,7 @@ pub const World = struct {
         }
         w.ageContacts(dt);
         w.ageSignals(dt);
+        w.ageTradeArcs(dt);
         try w.resolveCollisions();
 
         w.status_timer += dt;
@@ -2157,15 +2216,21 @@ pub const World = struct {
         // and spot nearby edible food visually so starving entities don't wander blind.
         e.touching = null;
         e.visible_food = null;
+        e.near_herb = null;
         const reach = e.radius() + 5;
         const sight = if (w.forage_only) reach else 120 + 50 * e.skill(.navigation);
         var best_edible: f32 = reach;
         var best_any: f32 = reach;
         var best_sight: f32 = sight;
+        var best_herb: f32 = sense_range;
         var any_touch: ?u32 = null;
         for (w.resources.items, 0..) |r, ri| {
             if (r.amount <= 0) continue;
             const d = r.pos.dist(e.pos);
+            if (!w.forage_only and r.food == .herb and !r.corpse and d < best_herb) {
+                best_herb = d;
+                e.near_herb = @intCast(ri);
+            }
             if (d >= sight) continue;
             const edible = canEat(e, r.food);
             if (edible > 0) {
@@ -2207,6 +2272,7 @@ pub const World = struct {
         e.nearest_kin_sim = 0;
         e.nearest_trust = 0;
         e.nearest_sickness = 0;
+        e.nearest_carrying = 0;
         var close_allies: u32 = 0;
         e.enemy_dist = sense_range;
         e.ally_dist = sense_range;
@@ -2235,6 +2301,12 @@ pub const World = struct {
                         e.nearest_kin_sim = kinSimilarity(e, o);
                         e.nearest_trust = e.trustOf(o.id);
                         e.nearest_sickness = o.sicknessLoad();
+                        e.nearest_carrying = switch (o.carrying) {
+                            .none => 0.0,
+                            .wood, .stone => 0.33,
+                            .food_pack => 0.66,
+                            .herb => 1.0,
+                        };
                     }
                     if (o.society != e.society) {
                         e.enemies_near += 1;
@@ -2369,6 +2441,7 @@ pub const World = struct {
         e.escape_timer -= dt;
         e.bump_cooldown = @max(0, e.bump_cooldown - dt);
         e.craft_cooldown = @max(0, e.craft_cooldown - dt);
+        e.offer_cooldown = @max(0, e.offer_cooldown - dt);
 
         // Age episodic memories & update internal neuromodulators (arousal, calm, motivation).
         if (!w.forage_only) {
@@ -2563,6 +2636,7 @@ pub const World = struct {
                 e.nearest_trust,
                 e.sicknessLoad(),
                 e.nearest_sickness,
+                e.nearest_carrying,
             }, motor_noise);
         }
 
@@ -2594,6 +2668,7 @@ pub const World = struct {
             .gather => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else (if (e.near_structure) |si| w.structures.items[si].pos else null),
             .craft_tool => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else null,
             .build => if (e.carrying == .none) (if (e.near_material) |mi| w.materials.items[mi].pos else null) else (if (e.near_structure) |si| w.structures.items[si].pos else if (!w.territories[e.society].contains(e.pos)) w.territories[e.society].center() else null),
+            .offer => if (e.ally) |o| w.entities.items[o].pos else if (e.enemy) |o| w.entities.items[o].pos else null,
         };
         if (target) |t| turn = steerTo(e.heading, e.pos, t, 4.8) + (if (!w.forage_only) g.cog.turn_out * 1.2 else 0);
 
@@ -3009,9 +3084,26 @@ pub const World = struct {
         }
         if (e.energy < 25) e.genome.cog.learn(-0.08 * dt);
 
-        // Emergent material gathering, tool-crafting, stigmergic building, cache use, and wild prey hunting.
+        // Emergent material/herb/food-pack gathering, self-use fallback, tool-crafting, building, cache, hunting & gift/barter offering!
         if (!w.forage_only and e.dead == null) {
-            // 1. Pick up raw material (wood/stone) when gathering, crafting, or building.
+            // 0. Emergency self-use of carried food pack (when hungry) or carried herb (when infected).
+            if (e.carrying == .food_pack and e.energy < 46) {
+                e.energy = @min(cap_energy, e.energy + 30);
+                e.food_eaten += 30;
+                e.since_meal = 0;
+                e.carrying = .none;
+                e.genome.cog.learn(0.55);
+            } else if (e.carrying == .herb and e.infection != null) {
+                e.herb_boost = @max(e.herb_boost, 28.0);
+                if (e.infection) |*inf| {
+                    inf.load = @max(0, inf.load - 0.35);
+                    e.boostAntibody(inf.strain_id, inf.sig, 0.22);
+                }
+                e.carrying = .none;
+                e.genome.cog.learn(0.75);
+            }
+
+            // 1. Pick up raw material (wood/stone), portable medicinal herb, or surplus food pack.
             if (e.carrying == .none and (e.action == .gather or e.action == .craft_tool or e.action == .build)) {
                 if (e.near_material) |mi| {
                     const mat = &w.materials.items[mi];
@@ -3022,14 +3114,39 @@ pub const World = struct {
                         e.genome.cog.learn(0.25);
                     }
                 }
+                if (e.carrying == .none and e.action == .gather) {
+                    if (e.near_herb) |hi| {
+                        const hr = &w.resources.items[hi];
+                        if (hr.amount >= 8 and hr.pos.dist(e.pos) < e.radius() + 14) {
+                            hr.amount -= 8;
+                            e.carrying = .herb;
+                            e.genome.cog.learn(0.30);
+                        }
+                    } else if (e.energy > 92) {
+                        if (e.touching) |ri| {
+                            const fr = &w.resources.items[ri];
+                            if (fr.amount >= 15 and fr.food != .herb and canEat(e, fr.food) > 0) {
+                                fr.amount -= 15;
+                                e.carrying = .food_pack;
+                                e.genome.cog.learn(0.25);
+                            }
+                        }
+                    }
+                }
             }
             if (e.near_prey) |pi| {
                 const pr = w.prey.items[pi];
                 if (pr.hp > 0) e.remember(.prey, pr.pos, 0.55);
             }
 
+            // 1b. Emergent Gift & Barter Offer (unscripted neural SocialAction.offer, Axelrod/Riolo c/b <= 0.30!).
+            if (e.action == .offer and e.offer_cooldown <= 0 and lstage != .infant) {
+                w.tryOffer(i);
+            }
+
             // 2. Craft a tool from carried material (stone -> Spear, wood -> Basket).
-            const want_craft = e.carrying != .none and e.craft_cooldown <= 0 and e.energy > 45 and
+            const carrying_mat = e.carrying == .wood or e.carrying == .stone;
+            const want_craft = carrying_mat and e.craft_cooldown <= 0 and e.energy > 45 and
                 (e.action == .craft_tool or (e.action == .gather and e.carrying == .stone and e.tool == .none));
             if (want_craft) {
                 e.craft_cooldown = 4.0;
@@ -3057,7 +3174,7 @@ pub const World = struct {
             }
 
             // 3. Stigmergic building & repair: contribute carried wood/stone to a structure or start a foundation.
-            const want_build = e.carrying != .none and e.energy > 42 and
+            const want_build = carrying_mat and e.energy > 42 and
                 (e.action == .build or (e.action == .gather and (e.carrying == .wood or e.tool != .none)));
             if (want_build) {
                 try w.tryBuild(i);
@@ -3229,7 +3346,10 @@ pub const World = struct {
                     o.genome.cog.learn(-dmg * 0.12);
                     if (!w.forage_only) {
                         o.remember(.danger, e.pos, 0.90);
-                        o.adjustTrust(e.id, -0.55 * dt);
+                        // Direct reciprocity defection penalty: attacking someone who recently gifted to you destroys trust!
+                        const defected = e.recentGiftFrom(o.id, w.time) != null;
+                        o.adjustTrust(e.id, if (defected) -0.75 else -0.55 * dt);
+                        if (defected) o.genome.cog.learn(-0.35);
                         o.genome.cog.noradrenaline = @min(1, o.genome.cog.noradrenaline + 0.5 * dt);
                     }
                     if (!w.forage_only and !w.pure_neural and o.call_cooldown <= 0) w.emitSignal(oi, .danger_call, e.pos);
@@ -3266,6 +3386,165 @@ pub const World = struct {
         const me = &w.entities.items[i];
         if (me.dead == null) {
             if (me.energy <= 0) try w.kill(i, .starved) else if (me.age > me.lifespan) try w.kill(i, .old_age);
+        }
+    }
+
+    /// Emergent Gift & Barter Transfer (unscripted neural SocialAction.offer):
+    /// Calibrated to Axelrod / Riolo reciprocity theory (c/b <= 0.30) so mutual aid & cross-biome barter are viable!
+    fn tryOffer(w: *World, donor_idx: usize) void {
+        const donor = &w.entities.items[donor_idx];
+        // Find nearest alive creature within physical handoff range (38u), kin or cross-clade!
+        var target_idx: ?usize = null;
+        var best_d: f32 = 38.0;
+        const cc = cellCoords(donor.pos);
+        const x0: usize = cc[0] -| 1;
+        const x1: usize = @min(grid_cols - 1, cc[0] + 1);
+        const y0: usize = cc[1] -| 1;
+        const y1: usize = @min(grid_rows - 1, cc[1] + 1);
+        for (y0..y1 + 1) |gy| {
+            for (x0..x1 + 1) |gx| {
+                var cur = w.grid_head[gy * grid_cols + gx];
+                while (cur >= 0) {
+                    const oi: usize = @intCast(cur);
+                    cur = w.grid_next.items[oi];
+                    const o = &w.entities.items[oi];
+                    if (o.dead != null or o.id == donor.id) continue;
+                    const d = o.pos.dist(donor.pos);
+                    if (d < best_d) {
+                        best_d = d;
+                        target_idx = oi;
+                    }
+                }
+            }
+        }
+        const ti = target_idx orelse return;
+        const rec = &w.entities.items[ti];
+        const rec_cap = max_energy * w.clades[@min(rec.society, w.clade_count - 1)].shape.energyCapMult() * rec.genome.body_scale;
+
+        var transferred = false;
+        var item_code: u8 = 0; // 0=energy_food, 1=wood, 2=stone, 3=food_pack, 4=herb
+        var donor_reward: f32 = 0.45;
+        var rec_reward: f32 = 0.70;
+
+        switch (donor.carrying) {
+            .herb => {
+                // Cost c=3, benefit b=~28 for sick partner (c/b = 0.11) or portable handoff!
+                if (rec.infection != null) {
+                    donor.carrying = .none;
+                    donor.energy = @max(5, donor.energy - 3.0);
+                    rec.herb_boost = @max(rec.herb_boost, 28.0);
+                    if (rec.infection) |*inf| {
+                        inf.load = @max(0, inf.load - 0.35);
+                        rec.boostAntibody(inf.strain_id, inf.sig, 0.22);
+                    }
+                    transferred = true;
+                    item_code = 4;
+                    donor_reward = 0.65;
+                    rec_reward = 0.95;
+                } else if (rec.carrying == .none) {
+                    donor.carrying = .none;
+                    donor.energy = @max(5, donor.energy - 2.0);
+                    rec.carrying = .herb;
+                    transferred = true;
+                    item_code = 4;
+                    donor_reward = 0.45;
+                    rec_reward = 0.65;
+                }
+            },
+            .food_pack => {
+                // Cost c=2, benefit b=28 (c/b = 0.07)!
+                if (rec.energy < rec_cap - 15) {
+                    donor.carrying = .none;
+                    donor.energy = @max(5, donor.energy - 2.0);
+                    rec.energy = @min(rec_cap, rec.energy + 28.0);
+                    rec.food_eaten += 28.0;
+                    rec.since_meal = 0;
+                    transferred = true;
+                    item_code = 3;
+                    donor_reward = 0.55;
+                    rec_reward = 0.85;
+                } else if (rec.carrying == .none) {
+                    donor.carrying = .none;
+                    donor.energy = @max(5, donor.energy - 1.5);
+                    rec.carrying = .food_pack;
+                    transferred = true;
+                    item_code = 3;
+                }
+            },
+            .wood, .stone => {
+                if (rec.carrying == .none) {
+                    const mat = donor.carrying;
+                    donor.carrying = .none;
+                    donor.energy = @max(5, donor.energy - 2.0);
+                    rec.carrying = mat;
+                    transferred = true;
+                    item_code = if (mat == .wood) 1 else 2;
+                    // Extra division-of-labor synergy when handing stone/wood to a skilled craftsman/builder!
+                    if (rec.skill(.building) > donor.skill(.building) or rec.skill(.toolcraft) > donor.skill(.toolcraft)) {
+                        donor_reward = 0.60;
+                        rec_reward = 0.85;
+                    }
+                }
+            },
+            .none => {
+                // Surplus energy sharing: c=10 surplus cost gives hungry recipient b=34 energy (c/b = 0.29 <= 0.30)!
+                if (donor.energy > 92 and rec.energy < 85) {
+                    donor.energy -= 10.0;
+                    rec.energy = @min(rec_cap, rec.energy + 34.0);
+                    rec.food_eaten += 34.0;
+                    rec.since_meal = 0;
+                    transferred = true;
+                    item_code = 0;
+                    donor_reward = 0.50;
+                    rec_reward = 0.85;
+                }
+            },
+        }
+        if (!transferred) return;
+
+        donor.offer_cooldown = 4.0;
+        donor.addSkill(.care, 0.05);
+        w.stats[donor.society].gifts_given += 1;
+
+        // Check for true reciprocity / cross-item barter within 45s window!
+        const reciprocal = donor.recentGiftFrom(rec.id, w.time) != null;
+        if (reciprocal) {
+            donor_reward += 0.55;
+            rec_reward += 0.55;
+            donor.adjustTrust(rec.id, 0.35);
+            w.stats[donor.society].reciprocal_trades += 1;
+            if (rec.society != donor.society) {
+                w.stats[donor.society].cross_clade_trades += 1;
+                w.stats[rec.society].cross_clade_trades += 1;
+            }
+            if (!w.stats[donor.society].had_trade) {
+                w.stats[donor.society].had_trade = true;
+                w.pushEvent(donor.society, .trade_emerged, w.stats[donor.society].reciprocal_trades);
+            }
+        }
+        rec.recordGiftFrom(donor.id, w.time, item_code, 0.35);
+        donor.genome.cog.learn(donor_reward);
+        rec.genome.cog.learn(rec_reward);
+
+        const arc = TradeArc{ .from = donor.pos, .to = rec.pos, .item = item_code, .reciprocal = reciprocal };
+        if (w.trade_arc_count < w.trade_arcs.len) {
+            w.trade_arcs[w.trade_arc_count] = arc;
+            w.trade_arc_count += 1;
+        } else {
+            w.trade_arcs[0] = arc;
+        }
+    }
+
+    fn ageTradeArcs(w: *World, dt: f32) void {
+        var i: usize = 0;
+        while (i < w.trade_arc_count) {
+            w.trade_arcs[i].age += dt;
+            if (w.trade_arcs[i].age >= trade_arc_duration) {
+                w.trade_arc_count -= 1;
+                w.trade_arcs[i] = w.trade_arcs[w.trade_arc_count];
+                continue;
+            }
+            i += 1;
         }
     }
 
