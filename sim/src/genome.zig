@@ -93,6 +93,7 @@ pub const CognitiveBrain = struct {
     prev_pred: f32 = 0,
     last_pred: f32 = 0,
     last_td_error: f32 = 0,
+    boot_pending: bool = false, // consume TD bootstrap at most once per decide() step
     /// Synapses/neurons sprouted through lifetime experience.
     lifetime_rewires: u16 = 0,
 
@@ -438,6 +439,7 @@ pub const CognitiveBrain = struct {
             }
         }
 
+        b.boot_pending = true;
         return @fromBackingInt(@intCast(best));
     }
 
@@ -447,7 +449,11 @@ pub const CognitiveBrain = struct {
     pub fn learn(b: *CognitiveBrain, reward: f32) void {
         if (@abs(reward) < 1e-4) return;
         const pred_scale = @min(@as(f32, 0.45), @abs(reward) * 1.5);
-        const td_boot = (0.90 * b.last_pred - b.prev_pred) * pred_scale;
+        // Consume one-step TD bootstrap at most once per decide() tick so per-frame dt rewards never double-count it.
+        const td_boot: f32 = if (b.boot_pending) blk: {
+            b.boot_pending = false;
+            break :blk (0.90 * b.last_pred - b.prev_pred) * pred_scale;
+        } else -b.last_pred * pred_scale * 0.25;
         const td = std.math.clamp(reward + td_boot, -1.5, 1.5);
         b.last_td_error = td;
         b.pred_bias = std.math.clamp(b.pred_bias + 0.03 * td, -2, 2);

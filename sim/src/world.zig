@@ -586,7 +586,7 @@ pub const Entity = struct {
         return e.age >= maturity_age;
     }
     pub fn readyToMate(e: *const Entity) bool {
-        const threshold = 90 - 30 * e.genome.trait(.fertility);
+        const threshold = 78 - 24 * e.genome.trait(.fertility);
         return e.dead == null and e.mature() and e.repro_cooldown <= 0 and e.energy > threshold;
     }
     pub fn skill(e: *const Entity, s: Skill) f32 {
@@ -790,8 +790,8 @@ pub fn sigSimilarity(a: [8]u8, b: [8]u8) f32 {
     return s / 8.0;
 }
 
-pub const infant_age: f32 = 60; // 1 min newborn/infant stage
-pub const maturity_age: f32 = 240; // 4 min to reach reproductive adulthood (for 1-2h lifespans)
+pub const infant_age: f32 = 45; // newborn/infant stage
+pub const maturity_age: f32 = 165; // ~2.75 min to reach reproductive adulthood (for 1-2h lifespans)
 pub const elder_frac: f32 = 0.25; // elder stage begins at 25% of lifespan (15-30 min)
 pub const max_energy: f32 = 150;
 pub const brain_hz: f32 = 20;
@@ -1884,12 +1884,13 @@ pub const World = struct {
             wc -= decomp;
             w.waste[ci] = @max(0, wc);
 
-            var nut = w.soil_nutrients[ci] + decomp * 2.2;
-            // Gentle natural mineral & nitrogen succession floor when abandoned ground rests.
-            if (rate > 0 and nut < 0.48) {
-                nut += (0.48 - nut) * 0.038 * rate * eco_dt;
+            var nut = w.soil_nutrients[ci] + decomp * 2.4;
+            // Gentle natural mineral & nitrogen succession floor when ground rests or rain washes minerals in.
+            const floor_nut: f32 = if (w.phase == .storm) 0.58 else 0.52;
+            if (rate > 0 and nut < floor_nut) {
+                nut += (floor_nut - nut) * 0.055 * rate * eco_dt;
             }
-            w.soil_nutrients[ci] = std.math.clamp(nut, 0.05, 2.5);
+            w.soil_nutrients[ci] = std.math.clamp(nut, 0.08, 2.5);
 
             var moi = w.soil_moisture[ci];
             switch (w.phase) {
@@ -1918,84 +1919,137 @@ pub const World = struct {
                 .herb => herb_n += 1,
             }
         }
-        const total_n = plant_n + mineral_n + univ_n + meat_n + herb_n;
-        const max_res: u32 = if (w.scarcity == .feast) 540 else 360;
-        if (total_n >= max_res) return;
-
-        const safe = bounds.inset(24);
-        // 3. Photosynthesis & Seed Dispersal: sprout growing Plants in nutrient- and moisture-rich soil cells.
-        const plant_trials: usize = @min(12, @max(3, @as(usize, @intFromFloat(6.5 * rate * sun))));
-        for (0..plant_trials) |_| {
-            if (plant_n >= (if (w.scarcity == .feast) @as(u32, 190) else 125)) break;
-            var pos: Vec2 = undefined;
-            if (w.resources.items.len > 0 and w.rng().float(f32) < 0.50) {
+        // Each trophic pool enforces its own carrying cap independently so abundant plants/herbs
+        // can NEVER starve out minerals or meat!
+        const safe = bounds.inset(28);
+        // Natural ecological clustering: real plants grow in lush groves/meadows, fungi fruit in clusters
+        // over fertile soil & graveyards, and minerals crystallize in veins around stone outcrops — creating
+        // strong coherent scent plumes and natural social oases where societies thrive & find mates!
+        const plant_cap: u32 = if (w.scarcity == .feast) 220 else 155;
+        const plant_groves: usize = @min(5, @max(1, @as(usize, @intFromFloat(2.4 * rate * sun))));
+        for (0..plant_groves) |_| {
+            if (plant_n >= plant_cap) break;
+            var center: Vec2 = undefined;
+            const roll = w.rng().float(f32);
+            if (roll < 0.45 and w.resources.items.len > 0) {
                 const seed_r = w.resources.items[w.rng().uintLessThan(usize, w.resources.items.len)];
-                if (seed_r.food == .plant and seed_r.amount > 15) {
+                if (seed_r.food == .plant and seed_r.amount > 12) {
                     const ang = w.rng().float(f32) * std.math.tau;
-                    const dist = 20 + w.rng().float(f32) * 80;
-                    pos = .{
+                    const dist = 16 + w.rng().float(f32) * 55;
+                    center = .{
                         .x = std.math.clamp(seed_r.pos.x + @cos(ang) * dist, safe.x, safe.x + safe.w),
                         .y = std.math.clamp(seed_r.pos.y + @sin(ang) * dist, safe.y, safe.y + safe.h),
                     };
                 } else {
-                    pos = w.randomIn(safe);
+                    center = w.randomIn(w.territories[1].inset(25));
                 }
+            } else if (roll < 0.82) {
+                center = w.randomIn(w.territories[1].inset(25));
             } else {
-                pos = w.randomIn(safe);
+                center = w.randomIn(safe);
             }
-            const cc = cellCoords(pos);
+            const cc = cellCoords(center);
             const cell = cc[1] * grid_cols + cc[0];
-            if (w.soil_nutrients[cell] > 0.28 and w.soil_moisture[cell] > 0.24) {
-                const seedling_amt = 24 + 16 * @min(1.0, w.soil_nutrients[cell]);
-                try w.resources.append(w.gpa, .{ .pos = pos, .food = .plant, .amount = seedling_amt, .patch = null, .corpse = false });
-                w.soil_nutrients[cell] = @max(0.05, w.soil_nutrients[cell] - 0.10);
-                plant_n += 1;
-            }
-        }
-
-        // 4. Fungal / Berry Detritivore Fruiting (.universal): blooms richly over fertile decomposed soil & graveyards!
-        const univ_trials: usize = @min(10, @max(3, @as(usize, @intFromFloat(5.5 * rate))));
-        for (0..univ_trials) |_| {
-            if (univ_n >= (if (w.scarcity == .feast) @as(u32, 180) else 115)) break;
-            const pos = w.randomIn(safe);
-            const cc = cellCoords(pos);
-            const cell = cc[1] * grid_cols + cc[0];
-            if (w.soil_nutrients[cell] > 0.34) {
-                const amt: f32 = if (w.soil_nutrients[cell] > 0.72) 45 else food_amount;
-                try w.resources.append(w.gpa, .{ .pos = pos, .food = .universal, .amount = amt, .patch = null, .corpse = false });
-                w.soil_nutrients[cell] = @max(0.05, w.soil_nutrients[cell] - 0.09);
-                univ_n += 1;
-            }
-        }
-
-        // 5. Geological Weathering (.mineral): rain & moisture leach mineral salts around stone outcrops.
-        if (w.materials.items.len > 0 and mineral_n < (if (w.scarcity == .feast) @as(u32, 145) else 95)) {
-            const weather_mult: f32 = if (w.phase == .storm) 1.55 else 1.0;
-            const min_trials: usize = @min(10, @max(4, @as(usize, @intFromFloat(5.0 * rate * weather_mult))));
-            for (0..min_trials) |_| {
-                const mat = w.materials.items[w.rng().uintLessThan(usize, w.materials.items.len)];
-                if (mat.kind != .stone or mat.amount <= 0) continue;
-                const ang = w.rng().float(f32) * std.math.tau;
-                const dist = 16 + w.rng().float(f32) * 85;
-                const pos = Vec2{
-                    .x = std.math.clamp(mat.pos.x + @cos(ang) * dist, safe.x, safe.x + safe.w),
-                    .y = std.math.clamp(mat.pos.y + @sin(ang) * dist, safe.y, safe.y + safe.h),
-                };
-                try w.resources.append(w.gpa, .{ .pos = pos, .food = .mineral, .amount = food_amount, .patch = null, .corpse = false });
-                mineral_n += 1;
-            }
-        }
-
-        // 6. Ambient wildlife carrion in hunting grounds & wild so young carnivores scavenge while
-        // learning to hunt Wild Prey; any uneaten carrion rots straight back into soil_nutrients.
-        if (meat_n < (if (w.scarcity == .feast) @as(u32, 100) else 65)) {
-            const meat_trials: usize = @min(4, @max(1, @as(usize, @intFromFloat(2.0 * rate))));
-            for (0..meat_trials) |_| {
-                if (w.rng().float(f32) < @min(0.95, 0.72 * rate)) {
-                    const area = if (w.rng().float(f32) < 0.65) w.territories[0].inset(25) else safe;
-                    try w.resources.append(w.gpa, .{ .pos = w.randomIn(area), .food = .meat, .amount = food_amount, .patch = null, .corpse = true });
-                    meat_n += 1;
+            if (w.soil_nutrients[cell] > 0.24 and w.soil_moisture[cell] > 0.20) {
+                const cluster_n: usize = if (w.soil_nutrients[cell] > 0.60) 4 else 3;
+                for (0..cluster_n) |_| {
+                    if (plant_n >= plant_cap) break;
+                    const a = w.rng().float(f32) * std.math.tau;
+                    const r = @sqrt(w.rng().float(f32)) * 34;
+                    const pos = Vec2{
+                        .x = std.math.clamp(center.x + @cos(a) * r, safe.x, safe.x + safe.w),
+                        .y = std.math.clamp(center.y + @sin(a) * r, safe.y, safe.y + safe.h),
+                    };
+                    const seedling_amt = 28 + 12 * @min(1.0, w.soil_nutrients[cell]);
+                    try w.resources.append(w.gpa, .{ .pos = pos, .food = .plant, .amount = seedling_amt, .patch = null, .corpse = false });
+                    plant_n += 1;
                 }
+                w.soil_nutrients[cell] = @max(0.08, w.soil_nutrients[cell] - 0.10);
+            }
+        }
+
+        // 4. Fungal / Berry Detritivore Fruiting (.universal): clustered blooms over fertile soil, manure & graveyards!
+        const univ_cap: u32 = if (w.scarcity == .feast) 220 else 150;
+        const univ_groves: usize = @min(5, @max(1, @as(usize, @intFromFloat(2.2 * rate))));
+        for (0..univ_groves) |_| {
+            if (univ_n >= univ_cap) break;
+            const center = if (w.rng().float(f32) < 0.65)
+                w.randomIn(w.territories[w.rng().uintLessThan(usize, w.clade_count)].inset(25))
+            else
+                w.randomIn(safe);
+            const cc = cellCoords(center);
+            const cell = cc[1] * grid_cols + cc[0];
+            if (w.soil_nutrients[cell] > 0.26) {
+                const amt: f32 = if (w.soil_nutrients[cell] > 0.65) 45 else food_amount;
+                const cluster_n: usize = if (w.soil_nutrients[cell] > 0.60) 4 else 3;
+                for (0..cluster_n) |_| {
+                    if (univ_n >= univ_cap) break;
+                    const a = w.rng().float(f32) * std.math.tau;
+                    const r = @sqrt(w.rng().float(f32)) * 36;
+                    const pos = Vec2{
+                        .x = std.math.clamp(center.x + @cos(a) * r, safe.x, safe.x + safe.w),
+                        .y = std.math.clamp(center.y + @sin(a) * r, safe.y, safe.y + safe.h),
+                    };
+                    try w.resources.append(w.gpa, .{ .pos = pos, .food = .universal, .amount = amt, .patch = null, .corpse = false });
+                    univ_n += 1;
+                }
+                w.soil_nutrients[cell] = @max(0.08, w.soil_nutrients[cell] - 0.08);
+            }
+        }
+
+        // 5. Geological Weathering (.mineral): clustered mineral veins around real stone outcrops & rocky caverns!
+        const min_cap: u32 = if (w.scarcity == .feast) 210 else 145;
+        if (mineral_n < min_cap) {
+            const weather_mult: f32 = if (w.phase == .storm) 1.55 else 1.0;
+            const min_trials: usize = @min(5, @max(2, @as(usize, @intFromFloat(2.4 * rate * weather_mult))));
+            for (0..min_trials) |_| {
+                if (mineral_n >= min_cap) break;
+                var center: Vec2 = undefined;
+                if (w.materials.items.len > 0 and w.rng().float(f32) < 0.35) {
+                    const mat = w.materials.items[w.rng().uintLessThan(usize, w.materials.items.len)];
+                    if (mat.kind == .stone and mat.amount > 0) {
+                        const base_a = w.rng().float(f32) * std.math.tau;
+                        const base_d = 16 + w.rng().float(f32) * 50;
+                        center = .{
+                            .x = std.math.clamp(mat.pos.x + @cos(base_a) * base_d, safe.x, safe.x + safe.w),
+                            .y = std.math.clamp(mat.pos.y + @sin(base_a) * base_d, safe.y, safe.y + safe.h),
+                        };
+                    } else {
+                        center = w.randomIn(w.territories[2].inset(25));
+                    }
+                } else {
+                    center = w.randomIn(w.territories[2].inset(25));
+                }
+                for (0..3) |_| {
+                    if (mineral_n >= min_cap) break;
+                    const a = w.rng().float(f32) * std.math.tau;
+                    const r = @sqrt(w.rng().float(f32)) * 28;
+                    const pos = Vec2{
+                        .x = std.math.clamp(center.x + @cos(a) * r, safe.x, safe.x + safe.w),
+                        .y = std.math.clamp(center.y + @sin(a) * r, safe.y, safe.y + safe.h),
+                    };
+                    try w.resources.append(w.gpa, .{ .pos = pos, .food = .mineral, .amount = food_amount, .patch = null, .corpse = false });
+                    mineral_n += 1;
+                }
+            }
+        }
+
+        // 6. Clustered wildlife carrion in carnivore hunting grounds & wild so carnivores form hunting clusters;
+        // uneaten carrion rots straight back into soil_nutrients!
+        const meat_cap: u32 = if (w.scarcity == .feast) 150 else 105;
+        if (meat_n < meat_cap and w.rng().float(f32) < @min(0.95, 0.80 * rate)) {
+            const area = if (w.rng().float(f32) < 0.72) w.territories[0].inset(28) else safe;
+            const center = w.randomIn(area);
+            for (0..3) |_| {
+                if (meat_n >= meat_cap) break;
+                const a = w.rng().float(f32) * std.math.tau;
+                const r = @sqrt(w.rng().float(f32)) * 30;
+                const pos = Vec2{
+                    .x = std.math.clamp(center.x + @cos(a) * r, safe.x, safe.x + safe.w),
+                    .y = std.math.clamp(center.y + @sin(a) * r, safe.y, safe.y + safe.h),
+                };
+                try w.resources.append(w.gpa, .{ .pos = pos, .food = .meat, .amount = food_amount, .patch = null, .corpse = true });
+                meat_n += 1;
             }
         }
 
@@ -2114,7 +2168,25 @@ pub const World = struct {
             p.stagger_timer = @max(0, p.stagger_timer - dt);
             p.lunge_timer = @max(0, p.lunge_timer - dt);
             p.sated_timer = @max(0, p.sated_timer - dt);
-            p.energy = @max(10, p.energy - 0.35 * dt);
+            // Lotka-Volterra trophic energy: apex predators actually starve if prey is too scarce!
+            p.energy -= 0.28 * dt;
+            if (p.energy <= 0) {
+                p.hp = 0;
+                try w.resources.append(w.gpa, .{ .pos = p.pos, .food = .meat, .amount = 55, .patch = null, .corpse = true });
+                continue;
+            }
+
+            // Also hunt Wild Prey when hungry (true multi-trophic food web, not exclusively farming societies!).
+            var wild_prey_idx: ?usize = null;
+            var wild_prey_d: f32 = 220;
+            for (w.prey.items, 0..) |*wp, wpi| {
+                if (wp.hp <= 0) continue;
+                const d = p.pos.dist(wp.pos);
+                if (d < wild_prey_d) {
+                    wild_prey_d = d;
+                    wild_prey_idx = wpi;
+                }
+            }
 
             // Scan nearby entities: stalk isolated / vulnerable targets outside shelters,
             // but recoil and flee if outnumbered by 3+ spear-wielding defenders!
@@ -2193,10 +2265,26 @@ pub const World = struct {
                     w.field.deposit(alarmChannel(target_e.society), target_e.pos.x, target_e.pos.y, dmg * 0.9);
                     if (target_e.energy <= 0 and target_e.dead == null) {
                         p.kills += 1;
-                        p.sated_timer = 32; // digest kill before stalking again
-                        p.energy = @min(140, p.energy + 45);
+                        p.sated_timer = 55; // digest kill before stalking again
+                        p.energy = @min(140, p.energy + 55);
                         p.hp = @min(p.max_hp, p.hp + 25);
-                        try w.killCorpse(ti, .killed, 18);
+                        try w.killCorpse(ti, .killed, 24);
+                    }
+                }
+            } else if (p.sated_timer <= 0 and wild_prey_idx != null) {
+                // Stalk & hunt wild prey in the frontier!
+                const wp = &w.prey.items[wild_prey_idx.?];
+                const d = p.pos.dist(wp.pos);
+                p.heading += steerTo(p.heading, p.pos, wp.pos, 4.0) * dt;
+                spd = if (p.stagger_timer > 0) 18 else 42;
+                if (d < p.radius() + wp.radius() + 6) {
+                    wp.hp -= 32 * dt;
+                    wp.flee_timer = 2.5;
+                    wp.heading = std.math.atan2(wp.pos.y - p.pos.y, wp.pos.x - p.pos.x);
+                    if (wp.hp <= 0) {
+                        p.sated_timer = 55;
+                        p.energy = @min(140, p.energy + 55);
+                        try w.resources.append(w.gpa, .{ .pos = wp.pos, .food = .meat, .amount = 42, .patch = null, .corpse = true });
                     }
                 }
             } else {
@@ -2217,7 +2305,11 @@ pub const World = struct {
         w.predator_timer += dt;
         if (w.predator_timer >= 120) {
             w.predator_timer = 0;
-            if (w.scarcity != .none and w.predatorCount() < 2) try w.spawnPredators(1);
+            // Lotka-Volterra carrying capacity: 1 predator once pop >= 50, 2 predators only when booming >= 105!
+            var alive_pop: u32 = 0;
+            for (0..w.clade_count) |si| alive_pop += w.population(si);
+            const target_preds: u32 = if (alive_pop >= 105) 2 else if (alive_pop >= 50) 1 else 0;
+            if (w.scarcity != .none and w.predatorCount() < target_preds) try w.spawnPredators(1);
         }
     }
 
@@ -3370,19 +3462,19 @@ pub const World = struct {
         const rest_mult: f32 = if (e.resting) 0.45 else 1.0;
         const my_cc = cellCoords(e.pos);
         const my_cell = my_cc[1] * grid_cols + my_cc[0];
-        const waste_stress: f32 = if (!w.forage_only and w.waste[my_cell] > 0.35) (w.waste[my_cell] - 0.35) * 0.45 else 0;
+        const waste_stress: f32 = if (!w.forage_only and w.waste[my_cell] > 0.85) (w.waste[my_cell] - 0.85) * 0.35 else 0;
         const harsh = ((if (home_rect.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * soc.shape.insulationMult() + waste_stress) * shelter_mult;
-        const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
-        const carry_cost: f32 = if (e.carrying != .none) 0.12 else 0;
-        const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0002 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
+        const move_cost = 0.0085 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
+        const carry_cost: f32 = if (e.carrying != .none) 0.08 else 0;
+        const brain_cost = 0.002 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0001 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
         const stage_drain: f32 = switch (lstage) {
-            .infant => 0.65,
-            .juvenile => 0.85,
+            .infant => 0.58,
+            .juvenile => 0.80,
             .adult => 1.0,
-            .elder => 0.92,
+            .elder => 0.90,
         };
         const kleiber = std.math.pow(f32, g.body_scale, 0.75);
-        const drain = (0.38 + 0.55 * g.trait(.speed) - 0.35 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult * stage_drain * kleiber;
+        const drain = (0.34 + 0.48 * g.trait(.speed) - 0.32 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.45 * harsh) * rest_mult * stage_drain * kleiber;
         e.energy -= drain * dt;
         // Return fraction of metabolized biomass as organic waste (decomposes back into soil_nutrients!).
         if (!w.forage_only) {
@@ -3683,8 +3775,8 @@ pub const World = struct {
         // Any two ready mature adults that court (or share high surplus/trust) and meet can breed.
         if (e.mate) |oi| {
             const o = &w.entities.items[oi];
-            const willing = e.action == .mate or o.action == .mate or (e.energy > 95 and o.energy > 95) or e.trustOf(o.id) > 0.25;
-            if (willing and o.pos.dist(e.pos) < e.radius() + o.radius() + 6 and e.readyToMate() and o.readyToMate()) {
+            const willing = e.action == .mate or o.action == .mate or (e.energy > 74 and o.energy > 74) or e.trustOf(o.id) > 0.20;
+            if (willing and o.pos.dist(e.pos) < e.radius() + o.radius() + 14 and e.readyToMate() and o.readyToMate()) {
                 try w.reproduce(i, oi);
             }
         }
@@ -4038,7 +4130,7 @@ pub const World = struct {
         child.parents = .{ a.id, b.id };
         child.hybrid = a.society != b.society or a.hybrid or b.hybrid;
         child.lineage = if (a.society != b.society) child.id else if (w.rng().boolean()) a.lineage else b.lineage;
-        child.energy = 50;
+        child.energy = 60;
         child.since_meal = 0;
 
         // Pass down learned skills: parents' care skill & sociability raise transfer fidelity.
@@ -4088,8 +4180,8 @@ pub const World = struct {
 
         for ([_]usize{ ai, bi }) |pi| {
             const p = &w.entities.items[pi];
-            p.energy -= 25;
-            p.repro_cooldown = if (p.stage() == .elder) 180 else 90;
+            p.energy -= 22;
+            p.repro_cooldown = if (p.stage() == .elder) 110 else 60;
             p.children += 1;
             p.addSkill(.care, 0.05);
             p.genome.cog.learn(0.8);

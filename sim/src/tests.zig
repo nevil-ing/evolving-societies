@@ -1325,6 +1325,7 @@ test "stage D: emergent offer transfers herbs and food at c/b <= 0.30, detects c
     a.society = 0;
     a.age = sim.maturity_age + 30;
     a.energy = 80;
+    a.repro_cooldown = 999;
     a.pos = .{ .x = 0, .y = 0 };
     a.carrying = .herb;
     a.action_timer = 0.08;
@@ -1336,6 +1337,7 @@ test "stage D: emergent offer transfers herbs and food at c/b <= 0.30, detects c
     b.society = 1;
     b.age = sim.maturity_age + 30;
     b.energy = 80;
+    b.repro_cooldown = 999;
     b.pos = .{ .x = 22, .y = 0 };
     b.carrying = .food_pack;
     b.action_timer = 0.16; // B reciprocates shortly AFTER A heals B!
