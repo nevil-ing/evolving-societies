@@ -323,6 +323,9 @@ pub const Entity = struct {
     alarm_adapt: f32 = 0, // receptor adaptation, alarm odour
     odour: f32 = 0, // unadapted levels, fed to the social network
     alarm: f32 = 0,
+    prev_odour: f32 = 0,
+    prev_food_sal: f32 = -1,
+    prev_threat_sal: f32 = -1,
 
     action: gen.SocialAction = .forage,
     action_timer: f32 = 0,
@@ -1384,7 +1387,7 @@ pub const World = struct {
         e.touching = null;
         e.visible_food = null;
         const reach = e.radius() + 5;
-        const sight = if (w.forage_only) reach else 95 + 45 * e.skill(.navigation);
+        const sight = if (w.forage_only) reach else 120 + 50 * e.skill(.navigation);
         var best_edible: f32 = reach;
         var best_any: f32 = reach;
         var best_sight: f32 = sight;
@@ -1625,24 +1628,67 @@ pub const World = struct {
             }
             mem_social_cue = std.math.clamp(mem_social_cue, -1, 1);
 
-            // Egocentric directional vision (-1 left .. 0 ahead .. +1 right).
-            const dir_food: f32 = if (e.visible_food) |fp|
-                egocentricBearing(e.heading, e.pos, fp)
-            else if (e.near_cache) |ci|
-                (if (w.structures.items[ci].stored_food > 5) egocentricBearing(e.heading, e.pos, w.structures.items[ci].pos) else 0)
-            else if (e.recall(.food, 0.2)) |fi|
-                egocentricBearing(e.heading, e.pos, e.memories[fi].pos)
+            // Egocentric directional vision (-1 left .. 0 ahead .. +1 right) and biological retinal salience.
+            var food_cue_pos: ?Vec2 = null;
+            if (e.visible_food) |fp| {
+                food_cue_pos = fp;
+                e.remember(.food, fp, 0.48);
+            } else if (e.near_cache) |ci| {
+                if (w.structures.items[ci].stored_food > 5) food_cue_pos = w.structures.items[ci].pos;
+            } else if (e.recall(.food, 0.2)) |fi| {
+                food_cue_pos = e.memories[fi].pos;
+            }
+            const dir_food: f32 = if (food_cue_pos) |fp| egocentricBearing(e.heading, e.pos, fp) else 0;
+            const food_sal: f32 = if (food_cue_pos) |fp|
+                (1.0 - 0.72 * @abs(dir_food)) / (1.0 + e.pos.dist(fp) / 140.0)
             else
-                0;
+                -1.0;
 
-            const dir_threat: f32 = if (e.near_predator) |pi|
-                egocentricBearing(e.heading, e.pos, w.predators.items[pi].pos)
-            else if (e.enemy) |ei|
-                egocentricBearing(e.heading, e.pos, w.entities.items[ei].pos)
-            else if (e.recall(.danger, 0.3)) |di|
-                egocentricBearing(e.heading, e.pos, e.memories[di].pos)
+            var threat_cue_pos: ?Vec2 = null;
+            if (e.near_predator) |pi| {
+                threat_cue_pos = w.predators.items[pi].pos;
+            } else if (e.enemy) |ei| {
+                threat_cue_pos = w.entities.items[ei].pos;
+            } else if (e.recall(.danger, 0.3)) |di| {
+                threat_cue_pos = e.memories[di].pos;
+            }
+            const dir_threat: f32 = if (threat_cue_pos) |tp| egocentricBearing(e.heading, e.pos, tp) else 0;
+            const threat_sal: f32 = if (e.near_predator) |pi|
+                (1.0 - 0.55 * @abs(dir_threat)) / (1.0 + e.pos.dist(w.predators.items[pi].pos) / 140.0)
             else
-                0;
+                -1.0;
+
+            // Schultz-style anticipatory sensory dopamine: evaluate the sensory outcome of the previous
+            // motor action (foveating/approaching food when hungry, or evading an approaching predator)
+            // right before picking the next action so node-perturbation traces align 1:1 with outcomes.
+            const hunger_now = std.math.clamp((85 - e.energy) / 65, 0, 1);
+            if (w.pure_neural) {
+                var sensory_td: f32 = 0;
+                if (hunger_now > 0.05) {
+                    if (food_sal >= 0 and e.prev_food_sal >= 0) {
+                        const df = food_sal - e.prev_food_sal;
+                        if (@abs(df) < 0.40) {
+                            sensory_td += std.math.clamp(df * (9.0 + 7.0 * hunger_now), -0.95, 1.0);
+                        }
+                    }
+                    if (e.odour > 0.01 or e.prev_odour > 0.01) {
+                        const d_od = e.odour - e.prev_odour;
+                        sensory_td += std.math.clamp(d_od * 1.8, -0.35, 0.45);
+                    }
+                }
+                if (threat_sal >= 0 and e.prev_threat_sal >= 0) {
+                    const dt_sal = e.prev_threat_sal - threat_sal; // positive = turned away / moved further from predator
+                    if (@abs(dt_sal) < 0.40) {
+                        sensory_td += std.math.clamp(dt_sal * 9.5, -1.0, 0.95);
+                    }
+                }
+                if (@abs(sensory_td) > 0.002) {
+                    g.cog.learn(std.math.clamp(sensory_td, -1.1, 1.1));
+                }
+            }
+            e.prev_odour = e.odour;
+            e.prev_food_sal = food_sal;
+            e.prev_threat_sal = threat_sal;
 
             const dir_kin: f32 = if (e.ally) |ai|
                 egocentricBearing(e.heading, e.pos, w.entities.items[ai].pos)
@@ -1671,7 +1717,19 @@ pub const World = struct {
             const heard_cue: f32 = if (e.heard_kind) |hk| (if (hk == .danger_call) @as(f32, -1.0) else 1.0) else 0;
             const dir_heard: f32 = if (e.heard_kind != null) egocentricBearing(e.heading, e.pos, e.heard_pos) else 0;
 
-            e.action = g.decide(.{
+            // Songbird LMAN-style exploratory motor babbling: stronger when hungry, threatened, or inexperienced,
+            // allowing zero-initialized cortical weights to discover steering/speed/calling online.
+            const motor_noise: [gen.motor_outputs]f32 = if (w.pure_neural) blk: {
+                const explore = std.math.clamp(0.14 + 0.30 * hunger_now + 0.16 * (1 - e.skill(.foraging)) + 0.14 * g.cog.noradrenaline, 0.10, 0.55);
+                break :blk .{
+                    w.rng().floatNorm(f32) * explore,
+                    w.rng().floatNorm(f32) * explore * 0.65,
+                    0,
+                    w.rng().floatNorm(f32) * explore * 0.45,
+                };
+            } else .{ 0, 0, 0, 0 };
+
+            e.action = g.decideExplore(.{
                 e.energy / max_energy,
                 @min(e.since_meal / 30, 1),
                 e.age / e.lifespan,
@@ -1700,7 +1758,7 @@ pub const World = struct {
                 dir_home,
                 heard_cue,
                 dir_heard,
-            });
+            }, motor_noise);
         }
 
         // Physical developmental constraint only: infants cannot fight, craft, build, or mate.

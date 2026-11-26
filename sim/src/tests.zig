@@ -834,3 +834,57 @@ test "world: pure neural mode defaults on and steers and vocalizes from cortical
     try std.testing.expect(w.entities.items[0].heading < -0.1);
     try std.testing.expect(w.stats[1].signals_sent >= 1);
 }
+
+test "world: blank-slate pure neural entity learns online to turn toward visible food and eat" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 4242);
+    try std.testing.expect(w.pure_neural);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    w.structures.clearRetainingCapacity();
+    w.field.clear();
+    while (w.entities.items.len > 1) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    // Blank-slate starving entity facing AWAY from food with ZERO initial turn weight and ZERO FlyWire steering!
+    const e = &w.entities.items[0];
+    e.society = 2; // Squares (mineral)
+    e.age = sim.maturity_age + 20;
+    e.energy = 38;
+    e.pos = .{ .x = 0, .y = 0 };
+    e.heading = std.math.pi * 0.65; // facing away from (55, 0) at 117 degrees
+    e.genome.traits[@backingInt(gen.Trait.speed)] = 0.75;
+    e.genome.motor[@backingInt(gen.MotorGene.turn)] = 0; // disable FlyWire turning so ONLY learned cortex steers!
+    e.genome.motor[@backingInt(gen.MotorGene.wander)] = 0;
+    e.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    e.genome.cog.synapse_count = 0;
+    e.genome.cog.bias = @splat(0);
+    e.genome.cog.pred_w = @splat(0);
+    e.genome.cog.pred_bias = 0;
+    e.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.forage)] = 2.0;
+    e.genome.cog.hebb_a = 1.0;
+    e.genome.cog.hebb_b = 0;
+    e.genome.cog.hebb_c = 0;
+    e.genome.cog.hebb_d = 0;
+    e.genome.cog.hebb_lr = 0.09;
+    // Start dir_food (20) -> turn_out (out_base + 8) at LITERAL ZERO weight!
+    e.genome.cog.synapses[0] = .{ .from = 20, .to = gen.out_base + gen.action_outputs + 0, .weight = 0.0, .active = true };
+    e.genome.cog.synapse_count = 1;
+    for (e.genome.fly_gain) |*g| g.* = 1.0;
+
+    try w.resources.append(gpa, .{ .pos = .{ .x = 55, .y = 0 }, .food = .mineral, .amount = 40, .patch = null });
+    for (0..60 * 14) |_| try w.step(1.0 / 60.0);
+
+    // The cortex must genuinely learn positive dir_food -> turn_out weight from 0.0 via motor babbling + dopamine,
+    // turn around on its own with ZERO steerTo, reach the food, and eat!
+    try std.testing.expect(w.entities.items[0].genome.cog.synapses[0].weight > 0.15);
+    try std.testing.expect(w.entities.items[0].food_eaten > 1.0);
+}

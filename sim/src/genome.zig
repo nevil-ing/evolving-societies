@@ -65,7 +65,7 @@ pub const CognitiveBrain = struct {
     hebb_a: f32 = 0.8,
     hebb_b: f32 = 0.0,
     hebb_c: f32 = 0.0,
-    hebb_d: f32 = -0.04,
+    hebb_d: f32 = -0.015,
     hebb_lr: f32 = 0.065,
     /// Runtime activations (hidden neurons carry leaky recurrent working memory).
     act: [max_cog_nodes]f32 = @splat(0),
@@ -111,7 +111,7 @@ pub const CognitiveBrain = struct {
             .hebb_a = std.math.clamp(0.8 + rng.floatNorm(f32) * 0.25, -1.5, 1.5),
             .hebb_b = std.math.clamp(rng.floatNorm(f32) * 0.12, -0.8, 0.8),
             .hebb_c = std.math.clamp(rng.floatNorm(f32) * 0.12, -0.8, 0.8),
-            .hebb_d = std.math.clamp(-0.04 + rng.floatNorm(f32) * 0.03, -0.3, 0.1),
+            .hebb_d = std.math.clamp(-0.015 + rng.floatNorm(f32) * 0.015, -0.15, 0.05),
             .hebb_lr = std.math.clamp(0.065 + rng.floatNorm(f32) * 0.02, 0.005, 0.15),
         };
         for (&b.bias) |*v| v.* = rng.floatNorm(f32) * 0.25;
@@ -288,8 +288,14 @@ pub const CognitiveBrain = struct {
         }
     }
 
-    /// Recurrent leaky forward pass with neuromodulation, value prediction, and eligibility traces.
+    /// Recurrent leaky forward pass (deterministic, zero exploratory noise).
     pub fn decide(b: *CognitiveBrain, in: [social_inputs]f32) SocialAction {
+        return b.decideExplore(in, .{ 0, 0, 0, 0 });
+    }
+
+    /// Recurrent leaky forward pass with LMAN-style exploratory motor babbling and
+    /// Fiete-Seung node-perturbation eligibility traces for online sensorimotor learning.
+    pub fn decideExplore(b: *CognitiveBrain, in: [social_inputs]f32, motor_noise: [motor_outputs]f32) SocialAction {
         var prev_h: [max_cog_hidden]f32 = @splat(0);
         for (0..b.hidden_count) |hi| prev_h[hi] = b.act[social_inputs + hi];
 
@@ -320,9 +326,10 @@ pub const CognitiveBrain = struct {
         for (0..b.hidden_count) |hi| pred += b.pred_w[hi] * b.act[social_inputs + hi];
         b.last_pred = std.math.tanh(pred);
 
-        // Evaluate discrete action logits (0..action_outputs-1) and continuous cortical outputs (turn, speed, mod).
+        // Evaluate discrete action logits (0..action_outputs-1) and continuous cortical outputs (turn, speed, mod, call).
         var best: usize = 0;
         var best_val: f32 = -std.math.inf(f32);
+        var motor_delta: [motor_outputs]f32 = @splat(0);
         for (0..social_outputs) |oi| {
             const node: u8 = @intCast(out_base + oi);
             var sum = accum[node];
@@ -343,9 +350,12 @@ pub const CognitiveBrain = struct {
                     best = oi;
                 }
             } else {
-                const val = std.math.tanh(sum);
+                const mi = oi - action_outputs;
+                const mean_val = std.math.tanh(sum);
+                const val = std.math.tanh(sum + motor_noise[mi]);
+                motor_delta[mi] = val - mean_val;
                 b.act[node] = val;
-                switch (oi - action_outputs) {
+                switch (mi) {
                     0 => b.turn_out = val,
                     1 => b.speed_out = val,
                     2 => b.mod_out = val,
@@ -355,14 +365,27 @@ pub const CognitiveBrain = struct {
             }
         }
 
-        // Update decaying Hebbian eligibility traces (1.7s distal reward window, Izhikevich 2007).
+        // Update decaying eligibility traces (1.7s distal reward window, Izhikevich 2007).
+        // Continuous motor synapses combine node-perturbation (pre * motor_delta) with post-synaptic Hebbian
+        // activity so zero-initialized synapses break symmetry and learn online from exploratory babbling.
         for (b.synapses[0..b.synapse_count], b.elig[0..b.synapse_count]) |s, *el| {
             if (!s.active) {
                 el.* = 0;
                 continue;
             }
             const pre = if (s.isRecurrent()) prev_h[s.from - social_inputs] else b.act[s.from];
-            el.* = 0.90 * el.* + 0.10 * pre * b.act[s.to];
+            if (s.to >= out_base + action_outputs) {
+                const mi = s.to - (out_base + action_outputs);
+                const post_sig = if (motor_noise[mi] != 0)
+                    0.80 * motor_delta[mi] + 0.20 * b.act[s.to]
+                else
+                    b.act[s.to];
+                // Fast motor trace (0.45 decay, full 1.0 current weight) so 1-step sensory TD
+                // cleanly credits the exact motor babble that produced the sensory change.
+                el.* = 0.45 * el.* + 1.0 * pre * post_sig;
+            } else {
+                el.* = 0.90 * el.* + 0.10 * pre * b.act[s.to];
+            }
         }
 
         return @fromBackingInt(@intCast(best));
@@ -371,21 +394,23 @@ pub const CognitiveBrain = struct {
     /// Evolved ABCD Hebbian meta-learning modulated by TD dopamine AND the brain's own evolved mod_out neuron.
     pub fn learn(b: *CognitiveBrain, reward: f32) void {
         if (@abs(reward) < 1e-4) return;
-        const td = std.math.clamp(reward - 0.35 * b.last_pred, -1.5, 1.5);
+        const pred_scale = @min(@as(f32, 1.0), @abs(reward) * 2.5);
+        const td = std.math.clamp(reward - 0.25 * b.last_pred * pred_scale, -1.5, 1.5);
         b.last_td_error = td;
         b.pred_bias = std.math.clamp(b.pred_bias + 0.03 * td, -2, 2);
         for (0..b.hidden_count) |hi| {
             b.pred_w[hi] = std.math.clamp(b.pred_w[hi] + 0.04 * td * b.act[social_inputs + hi], -2, 2);
         }
-        const mod_gate = std.math.clamp(0.65 * td + 0.35 * b.mod_out * @abs(td), -1.5, 1.5);
-        const lr: f32 = b.hebb_lr * (0.6 + 0.7 * b.dopamine + 0.4 * b.noradrenaline);
+        const mod_gate = std.math.clamp(0.72 * td + 0.28 * b.mod_out * @abs(td), -1.5, 1.5);
+        const lr: f32 = b.hebb_lr * (0.65 + 0.7 * b.dopamine + 0.4 * b.noradrenaline);
         for (b.synapses[0..b.synapse_count], b.elig[0..b.synapse_count]) |*s, el| {
             if (!s.active) continue;
             const pre = b.act[s.from];
             const post = b.act[s.to];
             const hebb = b.hebb_a * el + b.hebb_b * pre + b.hebb_c * post + b.hebb_d * s.weight;
-            if (@abs(hebb) < 1e-4) continue;
-            const delta = std.math.clamp(lr * mod_gate * hebb, -0.09, 0.09);
+            if (@abs(hebb) < 1e-6) continue;
+            const motor_boost: f32 = if (s.to >= out_base + action_outputs) 3.2 else 1.0;
+            const delta = std.math.clamp(lr * motor_boost * mod_gate * hebb, -0.25, 0.25);
             s.weight = std.math.clamp(s.weight + delta, -4, 4);
         }
         b.dopamine = std.math.clamp(b.dopamine + 0.18 * (std.math.clamp(0.5 + 0.45 * td, 0.05, 1.0) - b.dopamine), 0.05, 1.0);
@@ -454,6 +479,11 @@ pub const Genome = struct {
     /// Cognitive network forward pass; updates activations & eligibility traces.
     pub fn decide(g: *Genome, in: [social_inputs]f32) SocialAction {
         return g.cog.decide(in);
+    }
+
+    /// Forward pass with LMAN-style exploratory motor babbling on continuous outputs.
+    pub fn decideExplore(g: *Genome, in: [social_inputs]f32, motor_noise: [motor_outputs]f32) SocialAction {
+        return g.cog.decideExplore(in, motor_noise);
     }
 };
 

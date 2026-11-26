@@ -910,6 +910,8 @@ fn drawAlertBar(app: *App, sw: f32) void {
 }
 
 fn pushToast(app: *App, ev: sim.WorldEvent) void {
+    // Routine weather phase flips already update both the phase badge and top ticker bar.
+    if (ev.kind == .world_bloom or ev.kind == .world_storm) return;
     if (app.toast_count < app.toasts.len) {
         app.toasts[app.toast_count] = .{ .ev = ev };
         app.toast_count += 1;
@@ -1622,18 +1624,31 @@ fn drawHistory(w: *const World, x: f32, y: f32, width: f32, height: f32) void {
 
 fn drawInspector(app: *App, e: *const sim.Entity) !void {
     const s = sim.societies[e.society];
+    const sh: f32 = @floatFromInt(rl.GetScreenHeight());
     const x: f32 = 12;
-    var y: f32 = 114;
-    const h: f32 = if (app.show_brain) 728 else 534;
+    const top_y: f32 = 114;
+    const max_h = @max(@as(f32, 460), sh - 74 - top_y);
+    const want_h: f32 = if (app.show_brain) 666 else 504;
+    const h = @min(want_h, max_h);
+    var y = top_y;
     panel(x, y, 300, h);
-    y += 8;
-    text(x + 12, y, 17, societyColor(s), "{s} #{d}", .{ s.name, e.id });
-    text(x + 116, y + 4, 11, rgb(170, 210, 240), "{s} ({s})", .{ @tagName(e.role()), @tagName(e.stage()) });
+    y += 7;
+    var id_buf: [32]u8 = undefined;
+    const id_str = try std.fmt.bufPrint(&id_buf, "{s} #{d}", .{ s.name, e.id });
+    text(x + 12, y, 16, societyColor(s), "{s}", .{id_str});
+    const role_tag = @tagName(e.role());
+    const stage_tag = @tagName(e.stage());
+    const role_x = x + 18 + @as(f32, @floatFromInt(id_str.len)) * 8.2;
+    if (std.mem.eql(u8, role_tag, stage_tag)) {
+        text(role_x, y + 4, 11, rgb(170, 210, 240), "{s}", .{role_tag});
+    } else {
+        text(role_x, y + 4, 11, rgb(170, 210, 240), "{s} ({s})", .{ role_tag, stage_tag });
+    }
     if (smallBtn(rect(x + 232, y + 1, 56, 17), "Capture", rgb(44, 68, 86))) try captureSpecimen(app, e);
-    y += 22;
+    y += 21;
     text(x + 12, y, 11, rgb(190, 195, 210), "gen {d}  lin #{d}  age {d:.1}/{d:.0}m  kids {d}  kills {d}", .{ e.generation, e.lineage, e.age / 60, e.lifespan / 60, e.children, e.kills });
     if (e.hybrid) text(x + 258, y + 1, 10, rgb(255, 220, 60), "HYB", .{});
-    y += 15;
+    y += 14;
     const suffix: []const u8 = if (e.cannibal_target and e.action == .fight)
         " (hunting kin)"
     else if (e.recalling) |rk| switch (rk) {
@@ -1662,79 +1677,83 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     else
         "";
     text(x + 12, y, 11, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), suffix });
-    y += 15;
+    y += 14;
     text(x + 12, y, 11, rgb(175, 210, 220), "gear: {s} ({d:.0}%)   carrying: {s}", .{ @tagName(e.tool), e.tool_durability, @tagName(e.carrying) });
-    y += 16;
+    y += 15;
     bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
-    y += 18;
+    y += 16;
 
     text(x + 12, y, 12, rgb(235, 235, 245), "Senses -> fly circuit", .{});
-    y += 15;
+    y += 14;
     const sense = e.senses;
     bar2(x + 12, y, "odour L/R", sense.attr_L, sense.attr_R, rgb(120, 220, 160));
-    y += 14;
+    y += 13;
     bar2(x + 12, y, "alarm L/R", sense.alarm_L, sense.alarm_R, rgb(255, 140, 60));
-    y += 14;
+    y += 13;
     bar2(x + 12, y, "sugar/bitter", sense.sugar, sense.bitter, rgb(240, 220, 120));
-    y += 17;
+    y += 16;
 
     text(x + 12, y, 12, rgb(235, 235, 245), "Fly motor output", .{});
-    y += 15;
+    y += 14;
     const m = e.motor;
     bar2(x + 12, y, "DNa01/02 L/R", m.turn_L * 5, m.turn_R * 5, rgb(140, 180, 255));
-    y += 14;
+    y += 13;
     bar(x + 12, y, "DNp09 walk", m.fwd, rgb(140, 180, 255));
-    y += 14;
+    y += 13;
     bar(x + 12, y, "MDN back", m.back, rgb(140, 180, 255));
-    y += 14;
+    y += 13;
     bar(x + 12, y, "giant fibre", m.escape, rgb(140, 180, 255));
-    y += 14;
+    y += 13;
     bar(x + 12, y, "MN9 feed", m.feed, rgb(140, 180, 255));
-    y += 17;
+    y += 16;
 
     text(x + 12, y, 12, rgb(235, 235, 245), "Learned skills (passed down)", .{});
-    y += 15;
+    y += 14;
     for (e.skills, 0..) |v, i| {
         bar(x + 12, y, @tagName(@as(sim.Skill, @fromBackingInt(@intCast(i)))), v, rgb(95, 220, 195));
-        y += 13;
+        y += 12;
     }
     y += 4;
 
     text(x + 12, y, 12, rgb(235, 235, 245), "Genes", .{});
-    y += 15;
+    y += 14;
     for (e.genome.traits, 0..) |v, i| {
         bar(x + 12, y, @tagName(@as(gen.Trait, @fromBackingInt(@intCast(i)))), v, rgb(180, 160, 255));
-        y += 13;
+        y += 12;
     }
 
     if (app.show_brain) {
-        y += 5;
+        y += 4;
         const cog = &e.genome.cog;
         text(x + 12, y, 11, rgb(235, 235, 245), "Mind ({d}n, {d}s, {d} rec, +{d} grown)", .{
             cog.totalNeurons(), cog.activeSynapses(), cog.recurrentSynapses(), cog.lifetime_rewires,
         });
-        y += 14;
+        y += 13;
         text(x + 12, y, 10, rgb(165, 195, 220), "DA {d:.2}  NA {d:.2}  5HT {d:.2}   mem {d}/6  bonds {d}", .{
             cog.dopamine, cog.noradrenaline, cog.serotonin, e.activeMemories(), e.bondCount(),
         });
-        y += 13;
+        y += 12;
         text(x + 12, y, 10, rgb(185, 165, 225), "Hebb A {d:.2} lr {d:.3}  t {d:.2} s {d:.2} m {d:.2} c {d:.2}", .{
             cog.hebb_a, cog.hebb_lr, cog.turn_out, cog.speed_out, cog.mod_out, cog.call_out,
         });
-        y += 14;
-        drawCognitiveGraph(cog, x + 12, y, 276, 54);
-        y += 58;
+        y += 13;
+        drawCognitiveGraph(cog, x + 12, y, 276, 46);
+        y += 50;
 
         const c = app.world.circuit;
-        text(x + 12, y, 11, rgb(235, 235, 245), "FlyWire brainstem ({d} neurons, {d} synapses)", .{ c.neurons, c.connections() });
-        y += 13;
-        const cols: usize = 68;
-        const cell: f32 = 4;
-        for (e.brain.r, 0..) |r, i| {
-            const cx = x + 12 + @as(f32, @floatFromInt(i % cols)) * cell;
-            const cy = y + @as(f32, @floatFromInt(i / cols)) * cell;
-            const v: u8 = @intFromFloat(std.math.clamp(r, 0, 1) * 255);
-            rl.DrawRectangleRec(rect(cx, cy, cell - 0.8, cell - 0.8), .{ .r = v, .g = @intFromFloat(@as(f32, @floatFromInt(v)) * 0.7), .b = 40 + v / 3, .a = 255 });
+        const rem_h = top_y + h - y - 16;
+        if (rem_h >= 24) {
+            text(x + 12, y, 11, rgb(235, 235, 245), "FlyWire brainstem ({d} neurons, {d} synapses)", .{ c.neurons, c.connections() });
+            y += 13;
+            const cols: usize = 78;
+            const rows: f32 = @ceil(@as(f32, @floatFromInt(e.brain.r.len)) / @as(f32, @floatFromInt(cols)));
+            const cell = @min(@as(f32, 3.5), @max(1.8, (top_y + h - y - 6) / rows));
+            for (e.brain.r, 0..) |r, i| {
+                const cx = x + 12 + @as(f32, @floatFromInt(i % cols)) * cell;
+                const cy = y + @as(f32, @floatFromInt(i / cols)) * cell;
+                const v: u8 = @intFromFloat(std.math.clamp(r, 0, 1) * 255);
+                rl.DrawRectangleRec(rect(cx, cy, @max(1.0, cell - 0.6), @max(1.0, cell - 0.6)), .{ .r = v, .g = @intFromFloat(@as(f32, @floatFromInt(v)) * 0.7), .b = 40 + v / 3, .a = 255 });
+            }
         }
     }
 }
