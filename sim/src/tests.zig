@@ -1403,3 +1403,46 @@ test "stage E: binary snapshot save and load preserves full world state determin
     for (0..30) |_| try w2.step(1.0 / 60.0);
     try std.testing.expect(w2.time > w1.time);
 }
+
+test "world: dynamic storms shift bearing and veer while capped trails stay bounded under crowds" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 2036);
+
+    // Outside storms, wind is calm (zero).
+    const calm_w = w.windAt(.{ .x = 0, .y = 0 });
+    try std.testing.expectApproxEqAbs(@as(f32, 0), calm_w.x, 1e-6);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), calm_w.y, 1e-6);
+
+    // Across multiple storm cycles, bearings span different quadrants (not locked eastward!).
+    var saw_west = false;
+    var saw_east = false;
+    var saw_north = false;
+    var saw_south = false;
+    for (0..24) |_| {
+        w.setPhase(.storm);
+        const wv = w.windAt(.{ .x = 0, .y = 0 });
+        if (wv.x < -1.0) saw_west = true;
+        if (wv.x > 1.0) saw_east = true;
+        if (wv.y < -1.0) saw_north = true;
+        if (wv.y > 1.0) saw_south = true;
+    }
+    try std.testing.expect(saw_west and saw_east and saw_north and saw_south);
+
+    // During a storm, wind angle smoothly veers over time.
+    w.setPhase(.storm);
+    if (@abs(w.wind_veer) < 0.005) w.wind_veer = 0.03;
+    const a0 = w.wind_angle;
+    for (0..60 * 5) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(@abs(w.wind_angle - a0) > 0.01);
+
+    // Surface-saturated trail deposition prevents runaway pheromone black holes under 1,000-entity crowds.
+    for (0..1000) |_| {
+        w.field.depositCapped(sim.trailChannel(0), 0, 0, 1.0, 2.5);
+    }
+    const peak = w.field.sample(sim.trailChannel(0), 0, 0);
+    try std.testing.expect(peak <= 2.51);
+}

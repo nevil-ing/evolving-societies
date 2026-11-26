@@ -59,6 +59,7 @@ const App = struct {
     director: bool = false,
     director_timer: f32 = 0,
     director_target: sim.Vec2 = .{ .x = 0, .y = 0 },
+    wind_scroll: sim.Vec2 = .{ .x = 0, .y = 0 },
     director_zoom: f32 = 1.45,
     director_caption: [96]u8 = @splat(0),
     director_caption_len: usize = 0,
@@ -149,6 +150,13 @@ pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
                 const newest = app.world.events[app.world.event_count - 1];
                 const is_new = app.world.event_count > prev_count or (prev_last != null and (newest.time != prev_last.?.time or newest.kind != prev_last.?.kind));
                 if (is_new) pushToast(&app, newest);
+            }
+            if (app.world.phase == .storm) {
+                const wc = app.world.windAt(sim.bounds.center());
+                const vis_mult = @min(@as(f32, 4.0), @as(f32, @floatFromInt(speeds[app.speed])));
+                const dt_v = rl.GetFrameTime() * vis_mult;
+                app.wind_scroll.x = @mod(app.wind_scroll.x + wc.x * 16.0 * dt_v, sim.bounds.w);
+                app.wind_scroll.y = @mod(app.wind_scroll.y + wc.y * 16.0 * dt_v, sim.bounds.h);
             }
         }
         ageToasts(&app, rl.GetFrameTime());
@@ -651,14 +659,18 @@ fn drawWorld(app: *App) void {
     }
 
     if (w.phase == .storm) {
-        // Subtle drifting wind streaks across the world during storm waves.
-        const streak_col = withAlpha(rgb(155, 195, 255), 42);
-        const shift = @mod(w.time * 240, b.w);
-        for (0..36) |k| {
+        // Dynamic drifting wind streaks aligned with the live swirling storm vector at each point.
+        const streak_col = withAlpha(rgb(155, 195, 255), 48);
+        for (0..44) |k| {
             const kf: f32 = @floatFromInt(k);
-            const sx = b.x + @mod(kf * 197.3 + shift, b.w);
-            const sy = b.y + @mod(kf * 311.7 + w.time * 45, b.h);
-            rl.DrawLineEx(.{ .x = sx, .y = sy }, .{ .x = sx + 38, .y = sy + 12 }, 1.2 / zoom, streak_col);
+            const sx = b.x + @mod(kf * 197.3 + app.wind_scroll.x, b.w);
+            const sy = b.y + @mod(kf * 311.7 + app.wind_scroll.y, b.h);
+            const wv = w.windAt(.{ .x = sx, .y = sy });
+            const mag = @max(1.0, @sqrt(wv.x * wv.x + wv.y * wv.y));
+            const len = 26.0 + mag * 1.4;
+            const dx = wv.x / mag * len;
+            const dy = wv.y / mag * len;
+            rl.DrawLineEx(.{ .x = sx, .y = sy }, .{ .x = sx + dx, .y = sy + dy }, 1.2 / zoom, streak_col);
         }
     }
 
@@ -799,15 +811,19 @@ fn paintField(app: *App) void {
         switch (app.overlay) {
             .trails => {
                 // Wyatt (2010) 3-channel RGB chemical signature basis + 1 shared alarm channel.
-                const t0 = @min(1, f.data[sim.trailChannel(0)][i] * 0.6);
-                const t1 = @min(1, f.data[sim.trailChannel(1)][i] * 0.6);
-                const t2 = @min(1, f.data[sim.trailChannel(2)][i] * 0.6);
-                r += t0 * 255 + t1 * 90 + t2 * 90;
-                g += t0 * 90 + t1 * 140 + t2 * 230;
-                b += t0 * 80 + t1 * 255 + t2 * 120;
+                // Smooth hyperbolic tone-mapping keeps clade trail colors distinct even at 1,000 pop.
+                const c0 = f.data[sim.trailChannel(0)][i];
+                const c1 = f.data[sim.trailChannel(1)][i];
+                const c2 = f.data[sim.trailChannel(2)][i];
+                const t0 = c0 / (1.0 + c0 * 0.75);
+                const t1 = c1 / (1.0 + c1 * 0.75);
+                const t2 = c2 / (1.0 + c2 * 0.75);
+                r += t0 * 235 + t1 * 65 + t2 * 65;
+                g += t0 * 70 + t1 * 125 + t2 * 215;
+                b += t0 * 65 + t1 * 240 + t2 * 100;
                 const a = @min(1, f.data[sim.alarmChannel(0)][i] * 0.55);
-                r += a * 255;
-                g += a * 140;
+                r += a * 245;
+                g += a * 130;
                 b += a * 40;
             },
             .scent => {
@@ -825,7 +841,7 @@ fn paintField(app: *App) void {
         px[i * 4 + 0] = @intFromFloat(@min(255, r));
         px[i * 4 + 1] = @intFromFloat(@min(255, g));
         px[i * 4 + 2] = @intFromFloat(@min(255, b));
-        px[i * 4 + 3] = @intFromFloat(@min(200, m * 0.8));
+        px[i * 4 + 3] = @intFromFloat(@min(165, m * 0.68));
     }
     rl.UpdateTexture(app.field_tex, px.ptr);
 }

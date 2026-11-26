@@ -33,7 +33,7 @@ fn readPod(f: *CFILE, comptime T: type) !T {
 }
 
 const snapshot_magic = [4]u8{ 'E', 'S', 'A', 'V' };
-const snapshot_version: u32 = 1;
+const snapshot_version: u32 = 2;
 
 const SavedEntity = struct {
     id: u32,
@@ -879,6 +879,8 @@ pub const World = struct {
     clash_cooldown: f32 = 0,
     phase: WorldPhase = .calm,
     phase_offset: f32 = 0,
+    wind_angle: f32 = 0, // current storm front bearing (radians); rotates freshly each storm & veers dynamically
+    wind_veer: f32 = 0.025, // cyclonic/anticyclonic angular drift (rad/s) during storms
     territories: [max_societies]Rect = initTerritories(),
     /// Closed-loop biogeochemical Miniverse grids (25x20):
     ///   soil_nutrients : conserved soil fertility pulled by growing plants, replenished by waste & rotting corpses
@@ -924,6 +926,7 @@ pub const World = struct {
             .field = try .init(gpa, bounds.x, bounds.y, bounds.w, bounds.h, 16, &channels),
             .threads = @min(std.Thread.getCpuCount() catch 4, 10),
         };
+        w.rollStormWind();
         try w.populate();
         return w;
     }
@@ -956,6 +959,7 @@ pub const World = struct {
         w.clash_cooldown = 0;
         w.phase = .calm;
         w.phase_offset = 0;
+        w.rollStormWind();
         w.territories = initTerritories();
         w.soil_nutrients = @splat(0.65);
         w.soil_moisture = @splat(0.65);
@@ -993,6 +997,8 @@ pub const World = struct {
         try writePod(f, w.scarcity);
         try writePod(f, w.phase);
         try writePod(f, w.phase_offset);
+        try writePod(f, w.wind_angle);
+        try writePod(f, w.wind_veer);
         try writePod(f, w.pure_neural);
         try writePod(f, @as(u32, @intCast(w.clade_count)));
         try writePod(f, @as(u32, @intCast(w.history_count)));
@@ -1121,6 +1127,8 @@ pub const World = struct {
         w.scarcity = try readPod(f, Scarcity);
         w.phase = try readPod(f, WorldPhase);
         w.phase_offset = try readPod(f, f32);
+        w.wind_angle = try readPod(f, f32);
+        w.wind_veer = try readPod(f, f32);
         w.pure_neural = try readPod(f, bool);
         w.clade_count = @min(max_societies, try readPod(f, u32));
         w.history_count = @min(history_len, try readPod(f, u32));
@@ -1558,6 +1566,23 @@ pub const World = struct {
         return w.time + w.phase_offset;
     }
 
+    /// Pick a fresh 360-degree synoptic storm bearing and cyclonic/anticyclonic veer rate.
+    fn rollStormWind(w: *World) void {
+        w.wind_angle = w.rng().float(f32) * std.math.tau;
+        // Veers up to ~140 degrees over a 65s storm in either clockwise or counterclockwise swirl.
+        w.wind_veer = (w.rng().float(f32) - 0.5) * 0.076;
+    }
+
+    /// Live dynamic storm wind vector at `pos` (units/sec): combines the shifting/veering storm front,
+    /// gentle spatial wave curvature, and breathing gusts — zero fixed directional bias!
+    pub fn windAt(w: *const World, pos: Vec2) Vec2 {
+        if (w.phase != .storm) return .{ .x = 0, .y = 0 };
+        const swirl = 0.36 * @sin(pos.x * 0.0022 - pos.y * 0.0026 + w.time * 0.24);
+        const ang = w.wind_angle + swirl;
+        const mag = 11.0 + 4.5 * @sin(w.time * 0.42 + pos.x * 0.0015);
+        return .{ .x = @cos(ang) * mag, .y = @sin(ang) * mag };
+    }
+
     /// Immediately jump the world weather cycle to the start of `p`.
     pub fn setPhase(w: *World, p: WorldPhase) void {
         const target: f32 = switch (p) {
@@ -1571,7 +1596,12 @@ pub const World = struct {
         if (p != w.phase) {
             w.phase = p;
             if (p == .bloom) w.pushEvent(0, .world_bloom, 0);
-            if (p == .storm) w.pushEvent(0, .world_storm, 0);
+            if (p == .storm) {
+                w.rollStormWind();
+                w.pushEvent(0, .world_storm, 0);
+            }
+        } else if (p == .storm) {
+            w.rollStormWind();
         }
     }
 
@@ -1744,6 +1774,9 @@ pub const World = struct {
     /// Advance the simulation by one fixed tick.
     pub fn step(w: *World, dt: f32) !void {
         w.time += dt;
+        if (w.phase == .storm) {
+            w.wind_angle = @mod(w.wind_angle + w.wind_veer * dt, std.math.tau);
+        }
         w.raid_cooldown = @max(0, w.raid_cooldown - dt);
         w.field.update(dt);
         try w.updateFood(dt);
@@ -2590,7 +2623,8 @@ pub const World = struct {
             for (0..trail_basis_count) |bk| {
                 trail_sig += e.genome.chem_sig[bk] * w.field.sample(trailChannel(bk), a.x, a.y);
             }
-            odour[side] = @max(0, trail_sig);
+            // Cap trail pull so dense crowds cannot drown out real food scents or form a black-hole attractor.
+            odour[side] = @min(1.4, @max(0, trail_sig));
             for (0..food_type_count) |t| {
                 const edible = canEat(e, @fromBackingInt(@intCast(t)));
                 if (edible > 0) odour[side] += edible * w.field.sample(scentChannel(@fromBackingInt(@intCast(t))), a.x, a.y);
@@ -3412,13 +3446,14 @@ pub const World = struct {
                 }
             }
         }
-        // Physical crosswind during storms (completed shelters block 90%, huddled kin block 80%).
+        // Dynamic shifting crosswind during storms (completed shelters block 90%, huddled kin block 80%).
         const wind_scale: f32 = if (w.phase == .storm and !w.forage_only)
             (if (e.in_shelter) @as(f32, 0.1) else if (e.huddled or e.resting) @as(f32, 0.2) else if (home_rect.contains(e.pos)) @as(f32, 0.5) else 1.0)
         else
             0;
-        const step_x = (@cos(e.heading) * speed + e.bump_vel.x + 14 * wind_scale) * dt;
-        const step_y = (@sin(e.heading) * speed + e.bump_vel.y + 4.5 * wind_scale) * dt;
+        const wind = if (wind_scale > 0) w.windAt(e.pos) else Vec2{ .x = 0, .y = 0 };
+        const step_x = (@cos(e.heading) * speed + e.bump_vel.x + wind.x * wind_scale) * dt;
+        const step_y = (@sin(e.heading) * speed + e.bump_vel.y + wind.y * wind_scale) * dt;
         e.pos.x += step_x;
         e.pos.y += step_y;
         const moved = @sqrt(step_x * step_x + step_y * step_y);
@@ -3448,11 +3483,11 @@ pub const World = struct {
             e.heading += std.math.pi;
         }
 
-        // Lay a Wyatt (2010) signature-mixture food trail across the 3 shared trail basis channels.
+        // Lay a surface-saturated Wyatt (2010) signature-mixture food trail across the 3 shared trail basis channels.
         if (e.since_meal < 12) {
             const t_amt = g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt;
             for (0..trail_basis_count) |bk| {
-                w.field.deposit(trailChannel(bk), e.pos.x, e.pos.y, t_amt * g.chem_sig[bk]);
+                w.field.depositCapped(trailChannel(bk), e.pos.x, e.pos.y, t_amt * g.chem_sig[bk], 2.5);
             }
         }
 
@@ -4220,7 +4255,10 @@ pub const World = struct {
         if (next != w.phase) {
             w.phase = next;
             if (next == .bloom) w.pushEvent(0, .world_bloom, 0);
-            if (next == .storm) w.pushEvent(0, .world_storm, 0);
+            if (next == .storm) {
+                w.rollStormWind();
+                w.pushEvent(0, .world_storm, 0);
+            }
         }
     }
 

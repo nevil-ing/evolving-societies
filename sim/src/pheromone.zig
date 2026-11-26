@@ -64,6 +64,18 @@ pub const Field = struct {
         f.data[ch][cy * f.cols + cx] += amount;
     }
 
+    /// Surface-saturated chemical deposit (prevents runaway pheromone singularities in dense crowds).
+    pub fn depositCapped(f: *Field, ch: usize, x: f32, y: f32, amount: f32, cap: f32) void {
+        const gx = (x - f.origin_x) / f.cell;
+        const gy = (y - f.origin_y) / f.cell;
+        if (gx < 0 or gy < 0) return;
+        const cx: usize = @intFromFloat(gx);
+        const cy: usize = @intFromFloat(gy);
+        if (cx >= f.cols or cy >= f.rows) return;
+        const cell = &f.data[ch][cy * f.cols + cx];
+        cell.* = @min(cap, cell.* + amount);
+    }
+
     /// Bilinear sample at a world position.
     pub fn sample(f: *const Field, ch: usize, x: f32, y: f32) f32 {
         const gx = std.math.clamp((x - f.origin_x) / f.cell - 0.5, 0, @as(f32, @floatFromInt(f.cols - 2)));
