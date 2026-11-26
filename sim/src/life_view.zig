@@ -449,34 +449,43 @@ fn drawWorld(app: *App) void {
         rl.DrawTexturePro(app.field_tex, src, dst, .{ .x = 0, .y = 0 }, 0, rgb(255, 255, 255));
     }
 
-    // Persistent stigmergic structures (Shelters & Food Caches) drawn beneath creatures.
+    // Persistent stigmergic structures (Shelters, Food Caches & Abandoned Ruins) drawn beneath creatures.
     for (w.structures.items) |st| {
         if (st.integrity <= 0) continue;
-        const sc = cladeColor(w.clades[@min(st.society, w.clade_count - 1)]);
+        const sc = if (st.ruined) rgb(125, 130, 145) else cladeColor(w.clades[@min(st.society, w.clade_count - 1)]);
         const c = v2(st.pos);
         const r = st.radius();
         const done = st.complete();
         const line_w = (if (done) @as(f32, 2.2) else 1.2) / @max(zoom, 0.5);
         switch (st.kind) {
             .shelter => {
-                rl.DrawPoly(c, 6, r, 30, withAlpha(sc, if (done) 28 else 11));
-                rl.DrawPolyLinesEx(c, 6, r, 30, line_w, withAlpha(sc, if (done) 165 else 85));
-                if (done) {
-                    rl.DrawPolyLinesEx(c, 6, r * 0.55, 30, 1.0 / @max(zoom, 0.5), withAlpha(rgb(235, 240, 255), 55));
+                if (st.ruined) {
+                    rl.DrawPolyLinesEx(c, 6, r, 30, 1.3 / @max(zoom, 0.5), withAlpha(sc, 95));
+                    rl.DrawPolyLinesEx(c, 6, r * 0.72, 15, 1.0 / @max(zoom, 0.5), withAlpha(sc, 60));
+                } else {
+                    rl.DrawPoly(c, 6, r, 30, withAlpha(sc, if (done) 28 else 11));
+                    rl.DrawPolyLinesEx(c, 6, r, 30, line_w, withAlpha(sc, if (done) 165 else 85));
+                    if (done) {
+                        rl.DrawPolyLinesEx(c, 6, r * 0.55, 30, 1.0 / @max(zoom, 0.5), withAlpha(rgb(235, 240, 255), 55));
+                    }
                 }
             },
             .cache => {
                 const rr = rect(c.x - r * 0.65, c.y - r * 0.65, r * 1.3, r * 1.3);
-                rl.DrawRectangleRounded(rr, 0.25, 4, withAlpha(sc, if (done) 30 else 12));
-                rl.DrawRectangleRoundedLinesEx(rr, 0.25, 4, line_w, withAlpha(sc, if (done) 175 else 85));
-                if (done) {
-                    const frac = std.math.clamp(st.stored_food / sim.max_cache_food, 0, 1);
-                    rl.DrawRectangleRec(rect(c.x - 14, c.y - 3, 28, 6), rgb(24, 28, 40));
-                    rl.DrawRectangleRec(rect(c.x - 14, c.y - 3, 28 * frac, 6), rgb(255, 220, 75));
+                if (st.ruined) {
+                    rl.DrawRectangleRoundedLinesEx(rr, 0.25, 4, 1.3 / @max(zoom, 0.5), withAlpha(sc, 95));
+                } else {
+                    rl.DrawRectangleRounded(rr, 0.25, 4, withAlpha(sc, if (done) 30 else 12));
+                    rl.DrawRectangleRoundedLinesEx(rr, 0.25, 4, line_w, withAlpha(sc, if (done) 175 else 85));
+                    if (done) {
+                        const frac = std.math.clamp(st.stored_food / sim.max_cache_food, 0, 1);
+                        rl.DrawRectangleRec(rect(c.x - 14, c.y - 3, 28, 6), rgb(24, 28, 40));
+                        rl.DrawRectangleRec(rect(c.x - 14, c.y - 3, 28 * frac, 6), rgb(255, 220, 75));
+                    }
                 }
             },
         }
-        if (!done) {
+        if (!done and !st.ruined) {
             const pfrac = std.math.clamp(st.progress / 100, 0, 1);
             rl.DrawRectangleRec(rect(c.x - 14, c.y - 2, 28, 4), rgb(24, 28, 40));
             rl.DrawRectangleRec(rect(c.x - 14, c.y - 2, 28 * pfrac, 4), withAlpha(sc, 210));
@@ -504,7 +513,11 @@ fn drawWorld(app: *App) void {
         if (r.amount <= 0) continue;
         const radius = 2 + 3 * @sqrt(@min(r.amount, 40) / 40);
         const col = if (r.corpse) rgb(150, 40, 40) else foodColor(r.food);
-        rl.DrawCircleV(v2(r.pos), radius, col);
+        const c = v2(r.pos);
+        rl.DrawCircleV(c, radius, col);
+        if (r.food == .herb and !r.corpse) {
+            rl.DrawCircleLinesV(c, radius + 1.8, withAlpha(rgb(235, 195, 255), 140));
+        }
     }
 
     // Wild Prey (tough frontier quarry that rewards spears & group hunting).
@@ -548,6 +561,13 @@ fn drawWorld(app: *App) void {
             rl.DrawCircleV(v2(e.pos), e.radius() + 6, withAlpha(rgb(155, 195, 255), 32));
         } else if (e.resting) {
             rl.DrawCircleLinesV(v2(e.pos), e.radius() + 3.5, withAlpha(rgb(175, 200, 235), 90));
+        }
+        if (e.infection) |inf| {
+            const pulse = 1.0 + 0.25 * @sin(w.time * 6.0);
+            const r_sick = e.radius() + 4.5 + 3.5 * inf.load * pulse;
+            const alpha: u8 = @intFromFloat(std.math.clamp(90 + 135 * inf.load, 90, 225));
+            rl.DrawCircleV(v2(e.pos), r_sick, withAlpha(rgb(185, 235, 65), alpha / 4));
+            rl.DrawCircleLinesV(v2(e.pos), r_sick, withAlpha(rgb(185, 235, 65), alpha));
         }
         drawEntity(w, e, zoom, selected == e);
     }
@@ -1261,16 +1281,14 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     var y = py + 12;
     text(px + 14, y, 15, rgb(235, 235, 245), "Experiment Controls - Food, Weather, Hunting & Spawning (E)", .{});
     y += 22;
-    text(px + 14, y, 11, rgb(175, 185, 200), "Food: {d}   Corpses: {d}   Built: {d}   Tools: {d}   Prey: {d}   Pred: {d}   Cann: {d}/{d}/{d}", .{
+    text(px + 14, y, 11, rgb(175, 185, 200), "Food: {d}   Corpses: {d}   Built: {d}   Tools: {d}   Prey: {d}   Pred: {d}   Sick: {d}", .{
         w.foodCount(),
         w.corpseCount(),
         w.structureCount(),
         w.toolCount(),
         w.preyCount(),
         w.predatorCount(),
-        w.stats[0].cannibal_kills,
-        w.stats[1].cannibal_kills,
-        w.stats[2].cannibal_kills,
+        w.sickCount(),
     });
     y += 24;
 
@@ -1377,16 +1395,19 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     }
     y += 34;
 
-    // 4. Knowledge, Tools, Wild Prey & Apex Predators
-    text(px + 14, y, 12, rgb(225, 228, 240), "Tools, wildlife, speciation & brain mode", .{});
+    // 4. Knowledge, Tools, Wild Prey, Outbreaks & Speciation
+    text(px + 14, y, 12, rgb(225, 228, 240), "Tools, wildlife, immunity, speciation & brain mode", .{});
     y += 18;
-    if (smallBtn(rect(px + 14, y, 134, 24), "Spawn Prey (+3)", rgb(104, 72, 34))) {
+    if (smallBtn(rect(px + 14, y, 108, 24), "Spawn Prey (+3)", rgb(104, 72, 34))) {
         try w.spawnPrey(3);
     }
-    if (smallBtn(rect(px + 154, y, 152, 24), "Spawn Predator (+1)", rgb(135, 32, 62))) {
+    if (smallBtn(rect(px + 128, y, 122, 24), "Spawn Predator", rgb(135, 32, 62))) {
         try w.spawnPredators(1);
     }
-    if (smallBtn(rect(px + 312, y, 196, 24), "Inspire Pioneers (+Build/Tool)", rgb(44, 76, 86))) {
+    if (smallBtn(rect(px + 256, y, 122, 24), "Trigger Outbreak", rgb(92, 108, 32))) {
+        _ = w.triggerOutbreak();
+    }
+    if (smallBtn(rect(px + 384, y, 124, 24), "Inspire Pioneers", rgb(44, 76, 86))) {
         w.inspirePioneers();
     }
     y += 32;
@@ -1560,6 +1581,7 @@ fn formatEvent(w: *const World, buf: []u8, ev: sim.WorldEvent) []const u8 {
         .predator_slain => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} slew an Apex Predator ({d} total)!", .{ mins, secs, name, ev.value }),
         .cache_raided => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} raided a {s} food cache!", .{ mins, secs, w.clades[@min(ev.value, w.clade_count - 1)].name(), name }),
         .species_diverged => std.fmt.bufPrint(buf, "{d}:{d:0>2}  New species diverged: {s} (Gen {d})!", .{ mins, secs, name, ev.value }),
+        .outbreak => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Disease outbreak in {s} (strain #{d})!", .{ mins, secs, name, ev.value }),
         .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom - abundant food growth", .{ mins, secs }),
         .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
@@ -1572,6 +1594,7 @@ fn eventColor(w: *const World, ev: sim.WorldEvent) rl.Color {
         .cannibalism => rgb(255, 75, 125),
         .tool_discovered, .building_discovered, .predator_slain => rgb(110, 230, 235),
         .species_diverged => rgb(90, 245, 220),
+        .outbreak => rgb(185, 235, 75),
         .recovered, .boom, .world_bloom => rgb(100, 235, 145),
         .milestone_gen => cladeColor(w.clades[@min(ev.society, w.clade_count - 1)]),
         .first_hybrid, .hybrid_majority => rgb(255, 220, 70),
@@ -1638,7 +1661,9 @@ fn drawKey(app: *App, x: f32, top: f32) void {
     }
     y += 34;
     rl.DrawCircleV(.{ .x = x + 22, .y = y + 6 }, 4.5, rgb(150, 40, 40));
-    text(x + 34, y, 11, rgb(175, 180, 195), "Corpse (rotting meat)", .{});
+    text(x + 34, y, 11, rgb(175, 180, 195), "Corpse (rotting)", .{});
+    rl.DrawCircleV(.{ .x = x + 158, .y = y + 6 }, 4.5, foodColor(.herb));
+    text(x + 170, y, 11, rgb(210, 165, 250), "Herb (medicine)", .{});
     y += 22;
 
     text(x + 12, y, 12, rgb(215, 220, 232), "Entity states", .{});
@@ -1793,7 +1818,17 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     text(x + 12, y, 10, rgb(170, 200, 185), "diet M/P/X {d:.0}/{d:.0}/{d:.0}%   size x{d:.2} ({s})", .{
         e.genome.digest[0] * 100, e.genome.digest[1] * 100, e.genome.digest[2] * 100, e.genome.body_scale, @tagName(cl.shape),
     });
-    y += 14;
+    y += 13;
+    if (e.infection) |inf| {
+        text(x + 12, y, 10, rgb(195, 240, 85), "SICK {d:.0}% (strain #{d}, vir {d:.2})  ab {d}/4", .{
+            @min(100, inf.load * 100), inf.strain_id, inf.virulence, e.antibodyCount(),
+        });
+    } else {
+        text(x + 12, y, 10, rgb(145, 215, 175), "health: OK  antibodies {d}/4{s}", .{
+            e.antibodyCount(), if (e.herb_boost > 0) "  (herb boost)" else "",
+        });
+    }
+    y += 13;
     bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
     y += 16;
 
@@ -1975,6 +2010,7 @@ fn foodColor(t: sim.FoodType) rl.Color {
         .plant => rgb(78, 205, 160),
         .mineral => rgb(149, 200, 240),
         .universal => rgb(255, 235, 59),
+        .herb => rgb(195, 115, 255),
     };
 }
 

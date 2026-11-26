@@ -28,11 +28,11 @@ pub const MotorGene = enum(u8) {
 pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 
 /// Growing, recurrent cognitive network node layout:
-///   0 .. social_inputs-1                            : sensory, state, memory, acoustic ears, kinship & egocentric bearings
+///   0 .. social_inputs-1                            : sensory, state, memory, acoustic ears, kinship, health & egocentric bearings
 ///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable leaky recurrent hidden neurons
 ///   out_base .. out_base+action_outputs-1           : 8 discrete action outputs
 ///   out_base+8 .. out_base+14                       : 7 continuous cortical outputs (turn, speed, mod, call_vol, call_f0..f2)
-pub const social_inputs = 33;
+pub const social_inputs = 35;
 pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
 pub const action_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
 pub const motor_outputs = 7; // turn_out, speed_out, mod_out, call_out (vol), call_f[0..3]
@@ -490,6 +490,20 @@ pub const CognitiveBrain = struct {
         }
     }
 
+    /// Cultural observational imitation: when a juvenile witnesses a skilled elder succeed at crafting,
+    /// building, or hunting, gently bias its cortical action circuits toward that observed behavior.
+    pub fn imitateAction(b: *CognitiveBrain, action: SocialAction, rate: f32) void {
+        const ai = @backingInt(action);
+        const bi = max_cog_hidden + ai;
+        b.bias[bi] = std.math.clamp(b.bias[bi] + rate, -3, 3);
+        const node: u8 = @intCast(out_base + ai);
+        for (b.synapses[0..b.synapse_count]) |*s| {
+            if (s.active and s.to == node) {
+                s.weight = std.math.clamp(s.weight + rate * 0.25 * b.act[s.from], -4, 4);
+            }
+        }
+    }
+
     /// Experience-driven developmental rewiring: sprouts synapses and occasionally new neurons in life!
     pub fn sproutFromExperience(b: *CognitiveBrain, rng: Random) bool {
         if (b.lifetime_rewires >= 8) return false;
@@ -516,6 +530,8 @@ pub const Genome = struct {
     chem_sig: [3]f32 = .{ 1, 0, 0 },
     /// Heritable adult body scale (0.80..1.25) with Kleiber allometric metabolic scaling.
     body_scale: f32 = 1.0,
+    /// Innate MHC immune signature (8 polymorphic loci, alleles 0..15) driving Red Queen host-pathogen co-evolution.
+    mhc: [8]u8 = .{ 1, 3, 5, 7, 9, 11, 13, 15 },
     cog: CognitiveBrain,
     fly_gain: []f32, // one per cell type in the circuit
 
@@ -524,6 +540,16 @@ pub const Genome = struct {
     }
     pub fn motorGene(g: *const Genome, m: MotorGene) f32 {
         return g.motor[@backingInt(m)];
+    }
+
+    /// Innate MHC immune recognition score in [0, 1] against an 8-locus pathogen signature.
+    pub fn mhcAffinity(g: *const Genome, sig: [8]u8) f32 {
+        var score: f32 = 0;
+        for (g.mhc, sig) |a, b| {
+            const diff = if (a >= b) a - b else b - a;
+            if (diff == 0) score += 1.0 else if (diff == 1) score += 0.5;
+        }
+        return score / 8.0;
     }
 
     /// Biological specialist-vs-generalist digestive yield curve for meat (0), plant (1), mineral (2).
@@ -586,6 +612,7 @@ pub const Genome = struct {
         g.chem_sig = .{ g.kin_tag[0], g.kin_tag[1], g.kin_tag[2] };
         normalizeChem(&g.chem_sig);
         g.body_scale = std.math.clamp(1.0 + rng.floatNorm(f32) * 0.08, 0.80, 1.25);
+        for (&g.mhc) |*locus| locus.* = rng.uintLessThan(u8, 16);
         g.cog = CognitiveBrain.random(rng);
         g.fly_gain = try gpa.alloc(f32, cell_types);
         for (g.fly_gain) |*w| w.* = @max(0, 1 + 0.12 * rng.floatNorm(f32));
@@ -615,6 +642,11 @@ pub const Genome = struct {
         }
         normalizeChem(&g.chem_sig);
         g.body_scale = std.math.clamp((a.body_scale + b.body_scale) * 0.5 + mutation(rng, rate, 0.05), 0.80, 1.25);
+        for (&g.mhc, a.mhc, b.mhc) |*locus, ma, mb| {
+            var v = if (rng.boolean()) ma else mb;
+            if (rng.float(f32) < 0.04) v = rng.uintLessThan(u8, 16);
+            locus.* = v;
+        }
         g.cog = CognitiveBrain.child(rng, &a.cog, &b.cog, rate);
         g.fly_gain = try gpa.alloc(f32, a.fly_gain.len);
         // Gentle fly_gain mutation (0.05) curbs 350-D neutral drift while preserving brainstem selection.

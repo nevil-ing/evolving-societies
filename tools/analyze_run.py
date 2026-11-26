@@ -85,6 +85,11 @@ def main():
                 f"plant={f(last, 'avg_digest_p')*100:.0f}% mineral={f(last, 'avg_digest_x')*100:.0f}% "
                 f"| body_scale=x{f(last, 'avg_scale'):.2f} | active_clades={end.get('active_clades', '?')}"
             )
+        if "infections_cleared" in end:
+            print(
+                f"  Immunity: disease_deaths={end['disease_deaths']} | sick_now={end['sick_now']} "
+                f"| cleared={end['infections_cleared']} | avg_antibodies={f(last, 'avg_antibodies'):.2f}/4"
+            )
         print(
             f"  Spatial & storm response: outside_home={f(last, 'outside_home_frac')*100:.0f}% | "
             f"huddling calm={calm_hud*100:.0f}% vs storm={storm_hud*100:.0f}%"

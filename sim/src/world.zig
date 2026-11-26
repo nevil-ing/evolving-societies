@@ -32,8 +32,8 @@ pub const Rect = struct {
     }
 };
 
-pub const FoodType = enum(u8) { meat, plant, mineral, universal };
-pub const food_type_count = 4;
+pub const FoodType = enum(u8) { meat, plant, mineral, universal, herb };
+pub const food_type_count = 5;
 
 pub const Shape = enum(u8) {
     triangle,
@@ -189,7 +189,7 @@ pub const Patch = struct {
     live: u16,
 };
 
-pub const Death = enum { starved, old_age, killed };
+pub const Death = enum { starved, old_age, killed, disease };
 
 pub const Skill = enum(u8) {
     foraging, // faster & higher-yield eating
@@ -237,9 +237,10 @@ pub const Structure = struct {
     integrity: f32 = 100,
     stored_food: f32 = 0, // up to 240 for .cache
     builder_id: u32,
+    ruined: bool = false, // decayed abandoned ruin that migrating clades can reclaim & rebuild
 
     pub fn complete(s: *const Structure) bool {
-        return s.progress >= 100;
+        return s.progress >= 100 and !s.ruined;
     }
     pub fn radius(s: *const Structure) f32 {
         return switch (s.kind) {
@@ -329,7 +330,23 @@ pub fn phaseRemaining(time: f32) f32 {
     return cycle_length - t;
 }
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, predator_slain, cache_raided, world_bloom, world_storm, species_diverged };
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, predator_slain, cache_raided, world_bloom, world_storm, species_diverged, outbreak };
+
+pub const Antibody = struct {
+    strain_id: u32 = 0,
+    sig: [8]u8 = @splat(0),
+    strength: f32 = 0, // 0 = empty slot, up to 1.0 full memory immunity
+};
+pub const max_antibodies = 4;
+
+pub const Infection = struct {
+    strain_id: u32,
+    sig: [8]u8,
+    load: f32, // 0..1 active pathogen load
+    virulence: f32, // 0.2..0.85 metabolic fever cost & growth rate
+    transmissibility: f32, // 0.2..0.85 contagion probability
+    age: f32 = 0,
+};
 
 pub const WorldEvent = struct {
     time: f32,
@@ -434,6 +451,11 @@ pub const Entity = struct {
     memories: [max_memories]Memory = @splat(.{}),
     bonds: [max_bonds]SocialBond = @splat(.{}),
     recalling: ?MemoryKind = null,
+    /// Individual adaptive immune system: 4 cross-reactive antibody slots + active mutating pathogen.
+    antibodies: [max_antibodies]Antibody = @splat(.{}),
+    infection: ?Infection = null,
+    herb_boost: f32 = 0, // active medicinal-herb immune boost timer (3x antibody synthesis)
+    nearest_sickness: f32 = 0, // perceived sickness load of nearest creature (enables quarantine!)
 
     // Refreshed every brain tick.
     touching: ?u32 = null,
@@ -590,7 +612,62 @@ pub const Entity = struct {
         };
         return n;
     }
+
+    pub fn antibodyCount(e: *const Entity) u32 {
+        var n: u32 = 0;
+        for (e.antibodies) |ab| if (ab.strength > 0.15) {
+            n += 1;
+        };
+        return n;
+    }
+
+    pub fn sicknessLoad(e: *const Entity) f32 {
+        return if (e.infection) |inf| inf.load else 0;
+    }
+
+    /// Best cross-reactive antibody affinity in [0, 1] against a pathogen signature.
+    pub fn antibodyMatch(e: *const Entity, sig: [8]u8) f32 {
+        var best: f32 = 0;
+        for (e.antibodies) |ab| {
+            if (ab.strength <= 0.01) continue;
+            best = @max(best, ab.strength * sigSimilarity(ab.sig, sig));
+        }
+        return best;
+    }
+
+    /// Synthesize or strengthen an adaptive antibody matching `sig`.
+    pub fn boostAntibody(e: *Entity, strain_id: u32, sig: [8]u8, delta: f32) void {
+        if (delta <= 0) return;
+        var weakest_i: usize = 0;
+        var weakest_v: f32 = e.antibodies[0].strength;
+        for (&e.antibodies, 0..) |*ab, idx| {
+            if (ab.strength > 0.01 and sigSimilarity(ab.sig, sig) >= 0.75) {
+                ab.strength = std.math.clamp(ab.strength + delta, 0, 1);
+                ab.strain_id = strain_id;
+                ab.sig = sig;
+                return;
+            }
+            if (ab.strength < weakest_v) {
+                weakest_v = ab.strength;
+                weakest_i = idx;
+            }
+        }
+        e.antibodies[weakest_i] = .{
+            .strain_id = strain_id,
+            .sig = sig,
+            .strength = std.math.clamp(delta, 0, 1),
+        };
+    }
 };
+
+pub fn sigSimilarity(a: [8]u8, b: [8]u8) f32 {
+    var s: f32 = 0;
+    for (a, b) |x, y| {
+        const d = if (x >= y) x - y else y - x;
+        if (d == 0) s += 1.0 else if (d == 1) s += 0.5;
+    }
+    return s / 8.0;
+}
 
 pub const infant_age: f32 = 60; // 1 min newborn/infant stage
 pub const maturity_age: f32 = 240; // 4 min to reach reproductive adulthood (for 1-2h lifespans)
@@ -608,7 +685,7 @@ const adapt_floor: f32 = 0.02;
 
 pub const SocietyStats = struct {
     births: u32 = 0,
-    deaths: [3]u32 = .{ 0, 0, 0 },
+    deaths: [4]u32 = .{ 0, 0, 0, 0 }, // starved, old_age, killed, disease
     max_gen: u32 = 1,
     peak_pop: u32 = 25,
     status: SocietyStatus = .stable,
@@ -626,6 +703,8 @@ pub const SocietyStats = struct {
     prey_hunted: u32 = 0,
     predators_slain: u32 = 0,
     raids_suffered: u32 = 0,
+    infections_cleared: u32 = 0,
+    outbreaks_seen: u32 = 0,
     discovered_tools: bool = false,
     discovered_building: bool = false,
     /// Emergent language & dialect telemetry (observation only, never fed back as scripted rules).
@@ -685,6 +764,9 @@ pub const World = struct {
     waste: [grid_cells]f32 = @splat(0.0),
     waste_scratch: [grid_cells]f32 = @splat(0.0),
     eco_timer: f32 = 0,
+    immune_timer: f32 = 0,
+    outbreak_cooldown: f32 = 0,
+    next_strain_id: u32 = 1,
     events: [max_events]WorldEvent = undefined,
     event_count: usize = 0,
     gen_records: [max_gen_records]GenRecord = @splat(.{}),
@@ -752,6 +834,9 @@ pub const World = struct {
         w.soil_moisture = @splat(0.65);
         w.waste = @splat(0.0);
         w.eco_timer = 0;
+        w.immune_timer = 0;
+        w.outbreak_cooldown = 0;
+        w.next_strain_id = 1;
         w.event_count = 0;
         w.gen_records = @splat(.{});
         w.gen_record_count = 0;
@@ -826,7 +911,10 @@ pub const World = struct {
                 w.recordGeneration(e);
             }
         }
-        // Living wild prey herd (grazes plants, reproduces calves, drops corpses) & apex predator.
+        // Living wild prey herd (grazes plants, reproduces calves, drops corpses), frontier medicinal herbs & apex predator.
+        for (0..10) |_| {
+            try w.resources.append(w.gpa, .{ .pos = w.randomIn(wild), .food = .herb, .amount = 28, .patch = null, .corpse = false });
+        }
         try w.spawnPrey(10);
         try w.spawnPredators(1);
     }
@@ -926,11 +1014,80 @@ pub const World = struct {
     }
 
     /// Evolvable diet digestion yield: no hardcoded society diet lock!
-    /// Pure specialists extract ~100% on their evolved niche; generalists digest multiple foods at lower yield.
+    /// Medicinal herbs trigger true zoopharmacognosy (self-medication): strongly attractive when sick, ignored when healthy.
     pub fn canEat(e: *const Entity, food: FoodType) f32 {
         if (food == .universal) return 1.0;
+        if (food == .herb) return if (e.infection != null) 0.90 else 0.0;
         const y = e.genome.digestionYield(@backingInt(food));
         return if (e.hybrid) @max(y, 0.5) else y;
+    }
+
+    pub fn sickCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (w.entities.items) |e| {
+            if (e.dead == null and e.infection != null) n += 1;
+        }
+        return n;
+    }
+
+    /// Expose an entity to a pathogen strain; innate MHC + adaptive antibodies can block or blunt infection.
+    pub fn infectEntity(w: *World, e: *Entity, strain_id: u32, sig: [8]u8, virulence: f32, transmissibility: f32, init_load: f32) bool {
+        if (e.dead != null or e.infection != null) return false;
+        const mhc_aff = e.genome.mhcAffinity(sig);
+        const ab_match = e.antibodyMatch(sig);
+        const resist = 0.45 * mhc_aff + 0.85 * ab_match;
+        if (resist >= 0.72) {
+            // Immune memory neutralized the exposure and refreshed antibody titer!
+            e.boostAntibody(strain_id, sig, 0.08);
+            return false;
+        }
+        const eff_load = std.math.clamp(init_load * (1.0 - 0.55 * resist), 0.10, 0.75);
+        e.infection = .{
+            .strain_id = strain_id,
+            .sig = sig,
+            .load = eff_load,
+            .virulence = std.math.clamp(virulence, 0.20, 0.85),
+            .transmissibility = std.math.clamp(transmissibility, 0.20, 0.85),
+        };
+        _ = w;
+        return true;
+    }
+
+    /// Trigger a novel mutating pathogen outbreak in a dense living group (used by Exp E & tests).
+    pub fn triggerOutbreak(w: *World) u32 {
+        var sig: [8]u8 = undefined;
+        for (&sig) |*s| s.* = w.rng().uintLessThan(u8, 16);
+        const strain_id = w.next_strain_id;
+        w.next_strain_id += 1;
+        var seed_center: ?Vec2 = null;
+        var seed_soc: u8 = 0;
+        // Prefer a dense cluster / sheltered group so outbreaks test shelter vs quarantine trade-offs!
+        var best_crowd: u32 = 0;
+        for (w.entities.items) |e| {
+            if (e.dead != null or e.infection != null) continue;
+            const score = e.allies_near + (if (e.in_shelter) @as(u32, 3) else 0) + 1;
+            if (score > best_crowd) {
+                best_crowd = score;
+                seed_center = e.pos;
+                seed_soc = e.society;
+            }
+        }
+        const center = seed_center orelse return 0;
+        var infected: u32 = 0;
+        for (w.entities.items) |*e| {
+            if (e.dead != null or e.infection != null) continue;
+            if (e.pos.dist(center) <= 95 or infected == 0) {
+                if (w.infectEntity(e, strain_id, sig, 0.48, 0.68, 0.45)) {
+                    infected += 1;
+                    if (infected >= 4) break;
+                }
+            }
+        }
+        if (infected > 0) {
+            w.stats[seed_soc].outbreaks_seen += 1;
+            w.pushEvent(seed_soc, .outbreak, strain_id);
+        }
+        return infected;
     }
 
     pub fn activeCladeCount(w: *const World) u32 {
@@ -1231,6 +1388,7 @@ pub const World = struct {
             try w.updatePrey(dt);
             try w.updatePredators(dt);
             w.updateStructures(dt);
+            try w.updateImmunity(dt);
         }
 
         w.brain_accum += dt;
@@ -1384,6 +1542,7 @@ pub const World = struct {
         var mineral_n: u32 = 0;
         var univ_n: u32 = 0;
         var meat_n: u32 = 0;
+        var herb_n: u32 = 0;
         for (w.resources.items) |r| {
             if (r.amount <= 0) continue;
             switch (r.food) {
@@ -1391,9 +1550,10 @@ pub const World = struct {
                 .mineral => mineral_n += 1,
                 .universal => univ_n += 1,
                 .meat => meat_n += 1,
+                .herb => herb_n += 1,
             }
         }
-        const total_n = plant_n + mineral_n + univ_n + meat_n;
+        const total_n = plant_n + mineral_n + univ_n + meat_n + herb_n;
         const max_res: u32 = if (w.scarcity == .feast) 540 else 360;
         if (total_n >= max_res) return;
 
@@ -1471,6 +1631,18 @@ pub const World = struct {
                     try w.resources.append(w.gpa, .{ .pos = w.randomIn(area), .food = .meat, .amount = food_amount, .patch = null, .corpse = true });
                     meat_n += 1;
                 }
+            }
+        }
+
+        // 7. Rare frontier Medicinal Herbs (.herb): grow in moist wild pockets, forming a second vital need distinct from food!
+        if (herb_n < (if (w.scarcity == .feast) @as(u32, 42) else 26) and w.rng().float(f32) < @min(0.9, 0.35 * rate)) {
+            const pos = w.randomIn(bounds.inset(90));
+            const cc = cellCoords(pos);
+            const cell = cc[1] * grid_cols + cc[0];
+            if (w.soil_moisture[cell] > 0.48 and w.soil_nutrients[cell] > 0.30) {
+                try w.resources.append(w.gpa, .{ .pos = pos, .food = .herb, .amount = 28, .patch = null, .corpse = false });
+                w.soil_nutrients[cell] = @max(0.05, w.soil_nutrients[cell] - 0.06);
+                herb_n += 1;
             }
         }
     }
@@ -1698,12 +1870,140 @@ pub const World = struct {
     fn updateStructures(w: *World, dt: f32) void {
         const storm_wear: f32 = if (w.phase == .storm) 0.10 else 0.035;
         for (w.structures.items) |*s| {
-            if (s.complete()) {
+            if (s.ruined) {
+                // Abandoned archaeological ruins endure for ~30+ minutes so migrating clades can rediscover & reclaim them!
+                s.integrity -= 0.008 * dt;
+            } else if (s.complete()) {
                 s.integrity -= storm_wear * dt;
+                if (s.integrity <= 20) {
+                    s.ruined = true;
+                    s.integrity = 20;
+                    s.stored_food = 0;
+                }
             } else {
                 // Unfinished piles slowly erode if abandoned.
                 s.progress -= 0.15 * dt;
                 if (s.progress <= 0) s.integrity = 0;
+            }
+        }
+    }
+
+    /// Individual adaptive immune system, spatial O(N) contagion, pathogen mutation & environmental emergence.
+    fn updateImmunity(w: *World, dt: f32) !void {
+        w.outbreak_cooldown = @max(0, w.outbreak_cooldown - dt);
+        w.immune_timer += dt;
+        if (w.immune_timer < 0.5) return;
+        const idt = w.immune_timer;
+        w.immune_timer = 0;
+
+        const n = w.entities.items.len;
+        for (0..n) |i| {
+            const e = &w.entities.items[i];
+            if (e.dead != null) continue;
+            e.herb_boost = @max(0, e.herb_boost - idt);
+            // Slow adaptive antibody memory fade (lasts ~20+ simulated minutes).
+            for (&e.antibodies) |*ab| {
+                if (ab.strength > 0) ab.strength = @max(0, ab.strength - 0.0008 * idt);
+            }
+
+            if (e.infection) |*inf| {
+                inf.age += idt;
+                const mhc_aff = e.genome.mhcAffinity(inf.sig);
+                const ab_match = e.antibodyMatch(inf.sig);
+                const herb_mult: f32 = if (e.herb_boost > 0) 3.2 else 1.0;
+                const rest_mult: f32 = if (e.resting) 1.35 else 1.0;
+                const clearance = (0.032 + 0.095 * mhc_aff + 0.19 * ab_match) * herb_mult * rest_mult;
+                const growth = inf.virulence * 0.145 * (1.0 - 0.55 * ab_match);
+                inf.load = std.math.clamp(inf.load + (growth - clearance) * idt, 0, 1.2);
+                // Active immune learning: synthesize/refine antibodies targeting this strain.
+                e.boostAntibody(inf.strain_id, inf.sig, (0.055 + 0.045 * mhc_aff) * herb_mult * idt);
+
+                // Fever drain & malaise feedback into cortical learning.
+                const fever = inf.load * inf.virulence * 1.15 * idt;
+                e.energy -= fever;
+                e.genome.cog.learn(-0.045 * inf.load * idt);
+
+                if (inf.load <= 0.015) {
+                    const cleared_id = inf.strain_id;
+                    const cleared_sig = inf.sig;
+                    e.infection = null;
+                    e.boostAntibody(cleared_id, cleared_sig, 0.35);
+                    e.genome.cog.learn(0.85);
+                    w.stats[e.society].infections_cleared += 1;
+                    continue;
+                }
+
+                // O(N) spatial contagion: crowded shelters (2.2x) & huddles (1.5x) amplify spread!
+                if (inf.load > 0.18) {
+                    const src_pos = e.pos;
+                    const src_id = e.id;
+                    const src_shelter = e.in_shelter;
+                    const src_huddled = e.huddled;
+                    const inf_copy = inf.*;
+                    const reach: f32 = if (src_shelter) 68 else 46;
+                    const cc = cellCoords(src_pos);
+                    const x0: usize = cc[0] -| 1;
+                    const x1: usize = @min(grid_cols - 1, cc[0] + 1);
+                    const y0: usize = cc[1] -| 1;
+                    const y1: usize = @min(grid_rows - 1, cc[1] + 1);
+                    for (y0..y1 + 1) |gy| {
+                        for (x0..x1 + 1) |gx| {
+                            var cur = w.grid_head[gy * grid_cols + gx];
+                            while (cur >= 0) {
+                                const oi: usize = @intCast(cur);
+                                cur = w.grid_next.items[oi];
+                                const o = &w.entities.items[oi];
+                                if (o.dead != null or o.id == src_id or o.infection != null) continue;
+                                const d = o.pos.dist(src_pos);
+                                if (d >= reach) continue;
+                                const crowd_mult: f32 = if (src_shelter and o.in_shelter) 2.2 else if (src_huddled or o.huddled) 1.5 else 1.0;
+                                const prob = inf_copy.transmissibility * @min(1.0, inf_copy.load) * crowd_mult * (1.0 - d / reach) * 0.48 * idt;
+                                if (w.rng().float(f32) < prob) {
+                                    var next_sig = inf_copy.sig;
+                                    var next_id = inf_copy.strain_id;
+                                    var next_vir = inf_copy.virulence;
+                                    var next_trans = inf_copy.transmissibility;
+                                    // 12% antigenic mutation on host jump -> Red Queen co-evolution!
+                                    if (w.rng().float(f32) < 0.12) {
+                                        const locus = w.rng().uintLessThan(usize, 8);
+                                        next_sig[locus] = w.rng().uintLessThan(u8, 16);
+                                        next_vir = std.math.clamp(next_vir + w.rng().floatNorm(f32) * 0.06, 0.22, 0.80);
+                                        next_trans = std.math.clamp(next_trans + w.rng().floatNorm(f32) * 0.06, 0.25, 0.85);
+                                        next_id = w.next_strain_id;
+                                        w.next_strain_id += 1;
+                                    }
+                                    _ = w.infectEntity(o, next_id, next_sig, next_vir, next_trans, 0.22);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Severe unchecked infection can kill weakened hosts (dropping a contagious carcass).
+                const me = &w.entities.items[i];
+                if (me.dead == null and ((me.infection != null and me.infection.?.load >= 0.98 and me.energy < 24) or (me.energy <= 0 and me.infection != null and me.infection.?.load > 0.45))) {
+                    try w.kill(i, .disease);
+                }
+            } else if (w.outbreak_cooldown <= 0) {
+                // Spontaneous environmental pathogen emergence from unsanitary high-waste crowding or rotting corpses.
+                const cc = cellCoords(e.pos);
+                const cell = cc[1] * grid_cols + cc[0];
+                var risk: f32 = 0;
+                if (w.waste[cell] > 0.70) risk += (w.waste[cell] - 0.70) * 0.010 * idt;
+                if (e.in_shelter and e.allies_near >= 5) risk += 0.002 * idt;
+                if (risk > 0 and w.rng().float(f32) < risk) {
+                    var sig: [8]u8 = undefined;
+                    for (&sig) |*sv| sv.* = w.rng().uintLessThan(u8, 16);
+                    const sid = w.next_strain_id;
+                    w.next_strain_id += 1;
+                    const vir = 0.32 + w.rng().float(f32) * 0.22;
+                    const trn = 0.38 + w.rng().float(f32) * 0.24;
+                    if (w.infectEntity(e, sid, sig, vir, trn, 0.30)) {
+                        w.outbreak_cooldown = 75;
+                        w.stats[e.society].outbreaks_seen += 1;
+                        w.pushEvent(e.society, .outbreak, sid);
+                    }
+                }
             }
         }
     }
@@ -1906,6 +2206,7 @@ pub const World = struct {
         e.allies_near = 0;
         e.nearest_kin_sim = 0;
         e.nearest_trust = 0;
+        e.nearest_sickness = 0;
         var close_allies: u32 = 0;
         e.enemy_dist = sense_range;
         e.ally_dist = sense_range;
@@ -1933,6 +2234,7 @@ pub const World = struct {
                         nearest_dist = d;
                         e.nearest_kin_sim = kinSimilarity(e, o);
                         e.nearest_trust = e.trustOf(o.id);
+                        e.nearest_sickness = o.sicknessLoad();
                     }
                     if (o.society != e.society) {
                         e.enemies_near += 1;
@@ -2002,6 +2304,14 @@ pub const World = struct {
             for (w.structures.items, 0..) |st, si| {
                 if (st.integrity <= 0) continue;
                 const d = st.pos.dist(e.pos);
+                // Abandoned ruins can be discovered & reclaimed by ANY clade's builders!
+                if (st.ruined) {
+                    if (d < str_dist) {
+                        str_dist = d;
+                        e.near_structure = @intCast(si);
+                    }
+                    continue;
+                }
                 if (st.society != e.society) {
                     if (st.complete() and d < estr_dist) {
                         estr_dist = d;
@@ -2251,6 +2561,8 @@ pub const World = struct {
                 dir_heard,
                 e.nearest_kin_sim,
                 e.nearest_trust,
+                e.sicknessLoad(),
+                e.nearest_sickness,
             }, motor_noise);
         }
 
@@ -2547,6 +2859,7 @@ pub const World = struct {
         else
             std.math.clamp(1.0 + 0.30 * g.cog.speed_out, 0.55, 1.35);
         if (e.carrying != .none) speed *= 0.88;
+        if (e.infection) |inf| speed *= std.math.clamp(1.0 - 0.30 * inf.load, 0.55, 1.0);
         speed *= switch (lstage) {
             .infant => 0.72,
             .juvenile => 0.92,
@@ -2577,11 +2890,23 @@ pub const World = struct {
                     const basket_mult: f32 = if (e.tool == .basket) 1.35 else 1.0;
                     const bite = @min(r.amount, 30 * (1 + 0.35 * fskill) * basket_mult * m.feed * dt);
                     r.amount -= bite;
-                    const gained = bite * value * (1 + 0.25 * fskill);
+                    const gained = if (r.food == .herb)
+                        bite * 0.25 * (1 + 0.15 * fskill)
+                    else
+                        bite * value * (1 + 0.25 * fskill);
                     e.energy = @min(cap_energy, e.energy + gained);
                     e.food_eaten += gained;
                     e.since_meal = 0;
                     e.addSkill(.foraging, bite * 0.004);
+                    if (r.food == .herb) {
+                        // Zoopharmacognosy: medicinal herbs boost antibody synthesis 3x and directly suppress pathogen load!
+                        e.herb_boost = @max(e.herb_boost, 25.0);
+                        if (e.infection) |*inf| {
+                            inf.load = @max(0, inf.load - bite * 0.032);
+                            e.boostAntibody(inf.strain_id, inf.sig, bite * 0.018);
+                            e.genome.cog.learn(bite * 0.08);
+                        }
+                    }
                     if (e.tool == .basket) {
                         e.tool_durability -= 1.5 * dt;
                         if (e.tool_durability <= 0) e.tool = .none;
@@ -2723,6 +3048,7 @@ pub const World = struct {
                         st.discovered_tools = true;
                         w.pushEvent(e.society, .tool_discovered, st.tools_crafted);
                     }
+                    w.observeCraft(i, .craft_tool, .toolcraft);
                 } else {
                     // Trial-and-error learning: failed attempts still build toolcraft intuition.
                     e.addSkill(.toolcraft, 0.10);
@@ -2801,6 +3127,7 @@ pub const World = struct {
                             try w.resources.append(w.gpa, .{ .pos = .{ .x = pr.pos.x - 8, .y = pr.pos.y + 6 }, .food = .universal, .amount = 36, .patch = null, .corpse = false });
                             w.field.deposit(scentChannel(.universal), pr.pos.x, pr.pos.y, 3.0);
                             w.field.deposit(scentChannel(.meat), pr.pos.x, pr.pos.y, 3.0);
+                            w.observeCraft(i, .fight, .combat);
                         }
                     }
                 }
@@ -2942,15 +3269,51 @@ pub const World = struct {
         }
     }
 
+    /// Juvenile Observational Imitation (cultural ratchet): when a mature elder succeeds at a multi-step
+    /// craft, build, or hunt, nearby youths observe and bias their cortical circuits & skills toward it!
+    fn observeCraft(w: *World, actor_idx: usize, action: gen.SocialAction, skill_kind: Skill) void {
+        const actor = &w.entities.items[actor_idx];
+        if (!actor.mature()) return;
+        const soc = actor.society;
+        const pos = actor.pos;
+        const actor_id = actor.id;
+        const mentor_bonus: f32 = if (actor.stage() == .elder or actor.skill(skill_kind) > 0.35) 1.4 else 1.0;
+        const cc = cellCoords(pos);
+        const x0: usize = cc[0] -| 2;
+        const x1: usize = @min(grid_cols - 1, cc[0] + 2);
+        const y0: usize = cc[1] -| 2;
+        const y1: usize = @min(grid_rows - 1, cc[1] + 2);
+        for (y0..y1 + 1) |gy| {
+            for (x0..x1 + 1) |gx| {
+                var cur = w.grid_head[gy * grid_cols + gx];
+                while (cur >= 0) {
+                    const oi: usize = @intCast(cur);
+                    cur = w.grid_next.items[oi];
+                    const o = &w.entities.items[oi];
+                    if (o.dead != null or o.id == actor_id or o.society != soc or o.mature()) continue;
+                    if (o.pos.dist(pos) > 95) continue;
+                    o.genome.cog.imitateAction(action, 0.08 * mentor_bonus);
+                    o.addSkill(skill_kind, 0.03 * mentor_bonus);
+                }
+            }
+        }
+    }
+
     fn tryBuild(w: *World, i: usize) !void {
         const e = &w.entities.items[i];
         const bskill = e.skill(.building);
-        // 1. Stigmergy: contribute to a nearby incomplete or damaged friendly structure.
+        // 1. Stigmergy: contribute to a nearby incomplete/damaged structure OR reclaim an abandoned Ruin!
         if (e.near_structure) |si| {
             const st = &w.structures.items[si];
-            if ((!st.complete() or st.integrity < 85) and st.pos.dist(e.pos) < st.radius() + 18) {
+            if ((st.ruined or !st.complete() or st.integrity < 85) and st.pos.dist(e.pos) < st.radius() + 18) {
                 const was_complete = st.complete();
-                if (!was_complete) {
+                if (st.ruined) {
+                    st.ruined = false;
+                    st.society = e.society;
+                    st.progress = 100;
+                    st.integrity = 68;
+                    st.builder_id = e.id;
+                } else if (!was_complete) {
                     st.progress = @min(100, st.progress + 34 + 28 * bskill);
                 } else {
                     st.integrity = @min(100, st.integrity + 35 + 20 * bskill);
@@ -2969,12 +3332,16 @@ pub const World = struct {
                         w.pushEvent(e.society, .building_discovered, @backingInt(st.kind));
                     }
                 }
+                w.observeCraft(i, .build, .building);
                 return;
             }
         }
-        // 2. Start a new foundation inside territory or near strong kin trail if spaced clear of others.
+        // 2. Start a new foundation inside territory or near strong Wyatt kin trail if spaced clear of others.
         const in_home = w.territories[e.society].contains(e.pos);
-        const kin_trail = w.field.sample(trailChannel(e.society), e.pos.x, e.pos.y);
+        var kin_trail: f32 = 0;
+        for (0..trail_basis_count) |bk| {
+            kin_trail += e.genome.chem_sig[bk] * w.field.sample(trailChannel(bk), e.pos.x, e.pos.y);
+        }
         if (!in_home and kin_trail < 0.25) return;
 
         var soc_count: usize = 0;
@@ -2983,7 +3350,7 @@ pub const World = struct {
         for (w.structures.items) |st| {
             if (st.integrity <= 0) continue;
             if (st.pos.dist(e.pos) < 88) return; // keep structures cleanly spaced
-            if (st.society == e.society) {
+            if (!st.ruined and st.society == e.society) {
                 soc_count += 1;
                 if (st.kind == .shelter) shelters += 1 else caches += 1;
             }
@@ -3009,6 +3376,7 @@ pub const World = struct {
         e.addSkill(.building, 0.14);
         e.genome.cog.learn(0.65);
         _ = e.genome.cog.sproutFromExperience(w.rng());
+        w.observeCraft(i, .build, .building);
     }
 
     fn kill(w: *World, i: usize, cause: Death) !void {
@@ -3102,6 +3470,16 @@ pub const World = struct {
                 child.remember(.shelter, parent.memories[si].pos, parent.memories[si].confidence * 0.6);
             } else if (parent.recall(.food, 0.35)) |fi| {
                 child.remember(.food, parent.memories[fi].pos, parent.memories[fi].confidence * 0.55);
+            }
+            // Maternal / parental passive immunity: newborn receives 40% strength of parents' strongest antibodies!
+            var best_ab: ?Antibody = null;
+            for (parent.antibodies) |ab| {
+                if (ab.strength > 0.25 and (best_ab == null or ab.strength > best_ab.?.strength)) {
+                    best_ab = ab;
+                }
+            }
+            if (best_ab) |ab| {
+                child.boostAntibody(ab.strain_id, ab.sig, ab.strength * 0.40);
             }
         }
         child.adjustTrust(a.id, 0.6);

@@ -310,10 +310,10 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
     // Run a decision then apply positive reward: weights, predictor, continuous outputs, and dopamine should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0, 0, 0, 0, 0.6, 0.2 });
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0, 0, 0, 0, 0.6, 0.2, 0, 0 });
     try std.testing.expect(@abs(brain.call_out) <= 1.0);
     // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
-    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     var hidden_mag: f32 = 0;
     for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
     try std.testing.expect(hidden_mag > 1e-3);
@@ -1139,4 +1139,166 @@ test "stage B: true speciation creates dynamic clades beyond 3 and reproductive 
     for (0..90) |_| try w.step(1.0 / 60.0);
     try std.testing.expect(w.entities.items.len >= 3);
     try std.testing.expect(w.clade_count >= 5);
+}
+
+test "stage C: MHC + adaptive immunity, parental passive antibodies, shelter contagion, and medicinal herb recovery" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 202603);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    w.structures.clearRetainingCapacity();
+    while (w.entities.items.len > 3) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    const sig = [8]u8{ 2, 4, 6, 8, 10, 12, 14, 1 };
+    const host = &w.entities.items[0];
+    host.society = 1;
+    host.genome.kin_tag = w.clades[1].centroid_tag;
+    host.genome.digest = w.clades[1].centroid_digest;
+    host.age = sim.maturity_age + 20;
+    host.energy = 120;
+    host.repro_cooldown = 999; // focus Phase 1 on shelter contagion without premature mating
+    host.pos = .{ .x = 0, .y = 0 };
+    host.genome.mhc = .{ 9, 9, 9, 1, 1, 1, 1, 9 }; // low innate match so host catches the pathogen
+    host.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
+    for (host.genome.fly_gain) |*g| g.* = 1.0;
+
+    // 1. Trigger infection and check zoopharmacognosy (sick host finds medicinal herb strongly attractive!).
+    try std.testing.expect(World.canEat(host, .herb) < 0.25);
+    try std.testing.expect(w.infectEntity(host, 1, sig, 0.35, 0.80, 0.45));
+    try std.testing.expect(host.infection != null);
+    try std.testing.expect(World.canEat(host, .herb) >= 0.85);
+
+    // 2. Neighbor inside same completed shelter contracts the pathogen via high-density shelter contagion!
+    try w.structures.append(gpa, .{ .pos = .{ .x = 0, .y = 0 }, .society = 1, .kind = .shelter, .progress = 100, .builder_id = 1 });
+    const neighbor = &w.entities.items[1];
+    neighbor.society = 1;
+    neighbor.genome.kin_tag = w.clades[1].centroid_tag;
+    neighbor.genome.digest = w.clades[1].centroid_digest;
+    neighbor.age = sim.maturity_age + 20;
+    neighbor.energy = 120;
+    neighbor.repro_cooldown = 999;
+    neighbor.pos = .{ .x = 18, .y = 0 };
+    neighbor.genome.mhc = .{ 9, 9, 9, 1, 1, 1, 1, 9 };
+
+    // 3. Entity 2 already has strong adaptive antibody memory -> blocks infection cleanly!
+    const immune = &w.entities.items[2];
+    immune.society = 1;
+    immune.genome.kin_tag = w.clades[1].centroid_tag;
+    immune.genome.digest = w.clades[1].centroid_digest;
+    immune.age = sim.maturity_age + 20;
+    immune.energy = 120;
+    immune.repro_cooldown = 999;
+    immune.pos = .{ .x = -18, .y = 0 };
+    immune.boostAntibody(1, sig, 0.95);
+    try std.testing.expect(!w.infectEntity(immune, 1, sig, 0.35, 0.80, 0.45));
+
+    // Phase 1: Inside the shared shelter (before medicine), sick host spreads pathogen to susceptible neighbor!
+    w.entities.items[0].genome.traits[@backingInt(gen.Trait.speed)] = 0.0;
+    w.entities.items[1].genome.traits[@backingInt(gen.Trait.speed)] = 0.0;
+    w.entities.items[0].genome.motor[@backingInt(gen.MotorGene.forward)] = 0.0;
+    w.entities.items[1].genome.motor[@backingInt(gen.MotorGene.forward)] = 0.0;
+    var neighbor_caught = false;
+    for (0..60 * 15) |_| {
+        w.entities.items[0].pos = .{ .x = 0, .y = 0 };
+        w.entities.items[1].pos = .{ .x = 18, .y = 0 };
+        if (w.entities.items[0].infection) |*inf| inf.load = @max(inf.load, 0.55);
+        try w.step(1.0 / 60.0);
+        if (w.entities.items[1].infection != null) {
+            neighbor_caught = true;
+            break;
+        }
+    }
+    try std.testing.expect(neighbor_caught);
+
+    // Phase 2: Place a medicinal herb at host -> host eats it, boosts antibody synthesis 3x, and rapidly clears infection!
+    const herb_pos = w.entities.items[0].pos;
+    w.entities.items[0].infection = .{ .strain_id = 1, .sig = sig, .load = 0.45, .virulence = 0.35, .transmissibility = 0.80 };
+    try w.resources.append(gpa, .{ .pos = herb_pos, .food = .herb, .amount = 40, .patch = null });
+    for (0..60 * 4) |_| {
+        w.entities.items[0].pos = herb_pos;
+        try w.step(1.0 / 60.0);
+    }
+    try std.testing.expect(w.entities.items[0].herb_boost > 0);
+    try std.testing.expect(w.entities.items[0].antibodyCount() >= 1);
+    try std.testing.expect(w.entities.items[0].infection == null or w.entities.items[0].infection.?.load < 0.15);
+
+    // 4. Parental passive immunity: mating immune parent passes >= 30% antibody titer to newborn!
+    w.entities.items[0].infection = null;
+    w.entities.items[0].boostAntibody(1, sig, 0.95);
+    w.entities.items[0].pos = .{ .x = 100, .y = 0 };
+    w.entities.items[2].pos = .{ .x = 114, .y = 0 };
+    w.entities.items[0].energy = 140;
+    w.entities.items[2].energy = 140;
+    w.entities.items[0].repro_cooldown = 0;
+    w.entities.items[2].repro_cooldown = 0;
+    w.entities.items[0].genome.kin_tag = w.clades[1].centroid_tag;
+    w.entities.items[2].genome.kin_tag = w.clades[1].centroid_tag;
+    w.entities.items[0].genome.digest = w.clades[1].centroid_digest;
+    w.entities.items[2].genome.digest = w.clades[1].centroid_digest;
+    w.entities.items[0].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.mate)] = 4.0;
+    w.entities.items[2].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.mate)] = 4.0;
+    for (0..90) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items.len >= 4);
+    const newborn = &w.entities.items[w.entities.items.len - 1];
+    try std.testing.expect(newborn.antibodyMatch(sig) >= 0.30);
+}
+
+test "stage C: juvenile observational imitation transfers crafting and decayed structures become reclaimable ruins" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 202604);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    w.structures.clearRetainingCapacity();
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    // 1. Completed shelter at low integrity decays into an abandoned Ruin instead of vanishing!
+    try w.structures.append(gpa, .{ .pos = .{ .x = 0, .y = 0 }, .society = 0, .kind = .shelter, .progress = 100, .integrity = 20.02, .builder_id = 99 });
+    // Adult Circle builder stands at the ruin carrying stone; juvenile Circle stands nearby watching!
+    const builder = &w.entities.items[0];
+    builder.society = 1;
+    builder.age = sim.maturity_age + 40;
+    builder.energy = 120;
+    builder.pos = .{ .x = 12, .y = 0 };
+    builder.carrying = .stone;
+    builder.genome.cog.synapse_count = 0;
+    builder.genome.cog.bias = @splat(0);
+    builder.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.build)] = 4.0;
+
+    const youth = &w.entities.items[1];
+    youth.society = 1;
+    youth.age = sim.infant_age + 20; // juvenile!
+    youth.energy = 110;
+    youth.pos = .{ .x = 40, .y = 0 };
+    youth.genome.cog.synapse_count = 0;
+    youth.genome.cog.bias = @splat(0);
+    const youth_build_before = youth.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.build)];
+    const youth_skill_before = youth.skill(.building);
+
+    // Step 1 second: shelter decays below 20 -> becomes Ruin -> Circle builder reclaims it -> youth imitates build!
+    for (0..60) |_| try w.step(1.0 / 60.0);
+    try std.testing.expectEqual(@as(usize, 1), w.structures.items.len);
+    try std.testing.expect(!w.structures.items[0].ruined);
+    try std.testing.expectEqual(@as(u8, 1), w.structures.items[0].society);
+    try std.testing.expect(w.structures.items[0].integrity > 50);
+    // Watching juvenile imitated the elder's build action & gained observational building intuition!
+    try std.testing.expect(w.entities.items[1].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.build)] > youth_build_before);
+    try std.testing.expect(w.entities.items[1].skill(.building) > youth_skill_before);
 }
