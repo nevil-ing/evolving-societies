@@ -1,54 +1,74 @@
 # Evolving Societies
 
-An artificial life simulation where three groups (Triangles, Circles and Squares) compete for scarce food. Each creature's sensing, steering and feeding run through wiring taken from the fruit fly connectome.
+A native, real-time artificial-life sandbox where three societies — **Triangles**, **Circles**, and **Squares** — live, learn, build, hunt, and evolve across generations in a living 2D world.
 
-Every entity runs its own copy of a smell → steer → feed sub-circuit selected from the [FlyWire](https://flywire.ai) whole-brain connectome of *Drosophila melanogaster*: 1,597 neurons and 31,714 connections. The circuit is simulated as a simplified rate model; how senses feed into it and how its outputs move the body are modelling choices made here. On top of that sits a small evolved network for social choices: forage, fight, mate, socialize or flee. Food is scarce and keeps moving, so everyone has to find it, compete for it and leave chemical signals for their own kind.
-
-Written in Zig with raylib.
+Built in Zig with raylib as a fast, standalone desktop app with zero external runtime dependencies.
 
 ![Evolving Societies](docs/screenshot.png)
 
-## What we're trying to do
+## What It's About
 
-The goal is behaviour that **emerges** instead of being scripted. Nothing in the code tells an entity to follow a trail, guard a food patch or avoid where others died. What exists:
+Instead of scripting fixed rules for every behavior, *Evolving Societies* gives creatures senses, chemical fields, physical needs, and plastic neural networks — then lets survival, learning, and natural selection shape what happens next.
 
-- **Connectome-derived wiring.** Odour and taste inputs drive a circuit whose connections and signs (excitatory or inhibitory) come from the connectome, and its steering, walking and feeding neurons drive the body. The sensory encoding, the rate dynamics and the movement rules are simplifications chosen for this project.
-- **Chemistry.** Food gives off scent. After eating, an entity lays a trail for its society. Fights and deaths release alarm pheromone. All of it spreads and fades over time.
-- **Scarcity.** Food grows in patches that run out and reappear somewhere else. You can push the world from abundant down to famine.
-- **Evolution.** Children inherit a mix of their parents' genes with mutations: body traits, social-network weights, and a gain for each of the 417 fly cell types. Evolution tunes the circuit without rewiring it.
+You can sit back and watch lineages adapt over hours, click any individual to inspect its brain and memories live, or step in as an experimenter to trigger storms, famine, predators, or genetic mutations.
 
-What's assigned up front rather than emergent: the three groups, their diets, home territories and environments, and a rule that steers creatures back toward home. So far the simulation shows evolving populations. Whether anything worth calling social organisation emerges is the open question, and the next step is controlled experiments that separate inherited strategies from advantages built into the environment.
+## Key Features
 
-## How the fly circuit is wired in
+- **Pure Neural Mode & Live Online Learning:** Every individual runs a growing, recurrent neural network with continuous motor outputs (`turn`, `speed`, `neuromodulator`, `vocal call`). Through exploratory motor babbling and dopamine-modulated Hebbian plasticity, individuals adapt *during* their lifetime while evolution grows new neurons, synapses, and recurrent memory loops across generations. Runs in **Pure Neural** mode by default (zero steering autopilot), with a live **Assisted** toggle in Experiment Controls (`E`) to compare both side by side.
+- **Episodic Mental Maps & Social Bonds:** Creatures remember up to 6 spatial landmarks (food patches, quarries, shelters, prey, danger zones), clear stale beliefs when a remembered spot runs empty, share memories with kin on contact, and form social trust bonds.
+- **Emergent Tools & Stigmergic Building:** Renewable **Wood** and **Stone** deposits let societies organically discover **Baskets** (foraging boost), **Spears** (hunting & defense), **Shelters** (storm refuge and physical walls against predators), and **Food Caches** (communal stores — and raid targets for rival societies).
+- **Living Ecosystem, Wildlife & Weather:** Dynamic 5-minute **Calm → Bloom → Storm** weather cycles, diffusing food scents, society trails, and alarm pheromones, roaming **Wild Prey**, hunting **Apex Predators**, cross-society cache raiding, and emergent starvation cannibalism under extreme famine.
+- **Developmental Life Stages & Culture:** Realistic 1–2 hour simulated lifespans progress through **Infant → Juvenile → Adult → Elder** with childhood learning windows, elder mentoring, communal childcare, inherited skills, and emergent colony roles (`forager`, `scout`, `guard`, `caretaker`, `builder`, `hunter`, `elder`).
+- **Specimen Lab (`T`) & Experiment Controls (`E`):** Capture any creature to compare generations side-by-side, tweak traits/skills, mutate brains, and release clone batches (`x1`–`x50`). Use Experiment Controls to flood or clear food, jump weather phases, spawn prey or apex predators, or toggle Pure Neural vs. Assisted mode live.
+- **Uncapped Populations & Automatic Telemetry:** An $O(N)$ spatial hash grid keeps large civilizations running smoothly, while every run automatically logs CSV telemetry that can be summarized with `tools/analyze_run.py`.
 
-- **Sensing.** Two antennae sample the chemical fields on either side of the head. Their signals drive attractive odour receptor neurons (glomeruli DM1, DM2, DM4, VA2, VM2) and aversive ones (V for CO₂, DA2 for geosmin). Touching food drives sugar or bitter taste neurons, depending on whether that society can digest it. Receptor input adapts to the background smell level, as real olfactory neurons do.
-- **Acting.** The left/right balance of the DNa01/DNa02 descending neurons steers. DNp09 drives walking, MDN backs up, and the giant fibre triggers escape bursts. An entity only eats while the MN9 proboscis motor neuron fires.
-- **Dynamics.** Each copy is simulated as a rate model at 20 Hz, spread across CPU cores.
+## Download & Run (macOS)
 
-In a controlled test (a single food patch 150 units away, social behaviour switched off, 10 paired seeds with identical starting creatures), 286 of 750 entities steered by the fly circuit reached the food within 40 seconds, against 117 of 750 with steering disabled. Steering won in every seed. `zig build test -Dslow=true` reruns it.
+Grab the latest **`Evolving-Societies-macOS.dmg`** from the [Releases](https://github.com/nevil-ing/evolving-societies/releases) page:
 
-## Building
+1. Open `Evolving-Societies-macOS.dmg` and drag **Evolving Societies** into **Applications**.
+2. Launch it from **Applications**, **Spotlight**, or **Launchpad**.
+   *(Because the app is ad-hoc signed without an Apple Developer certificate, on first launch macOS may ask you to right-click the app → **Open**, or allow it once under **System Settings → Privacy & Security**.)*
 
-Requires [Zig 0.17.0](https://ziglang.org/download/). raylib 6.2 is fetched by the build.
+When launched as a macOS app, run telemetry CSVs are saved automatically to `~/Library/Application Support/Evolving Societies/runs/`.
+
+## Building from Source
+
+Requires [Zig 0.17.0](https://ziglang.org/download/). `raylib 6.2` is fetched automatically by the build system.
 
 ```bash
 cd sim
 zig build run -Doptimize=ReleaseFast
 ```
 
-Tests:
+### Build the Native macOS `.app` & `.dmg`
 
 ```bash
-zig build test -Doptimize=ReleaseFast              # circuit and world checks
-zig build test -Doptimize=ReleaseFast -Dslow=true  # plus chemotaxis and long multi-seed runs
+./tools/package_macos_app.sh --install --dmg
 ```
 
-`zig-out/bin/evolving-societies --shot out.png 120` simulates 120 seconds, saves a screenshot and exits.
+This compiles a `ReleaseFast` binary, generates the Retina `AppIcon.icns`, assembles `dist/Evolving Societies.app`, installs it into `/Applications/Evolving Societies.app`, and creates `dist/Evolving-Societies-macOS.dmg`.
+
+### Headless Runs, Screenshots & Tests
+
+```bash
+# Headless 10-minute simulation with CSV telemetry analysis
+./sim/zig-out/bin/evolving-societies --headless 600 --seed 8080 --out run.csv
+python3 tools/analyze_run.py run.csv
+
+# Capture a Retina screenshot after simulating 260s
+./sim/zig-out/bin/evolving-societies --seed 8080 --shot docs/screenshot.png 260 0.65
+
+# Run the test suite
+cd sim
+zig build test -Doptimize=ReleaseFast              # fast unit & online-learning checks
+zig build test -Doptimize=ReleaseFast -Dslow=true  # plus chemotaxis & 6-seed 10-minute worlds
+```
 
 <details>
-<summary>macOS: build fails fetching <code>xcode_frameworks</code></summary>
+<summary>macOS troubleshooting: build fails fetching <code>xcode_frameworks</code></summary>
 
-raylib depends on a macOS frameworks package hosted at `pkg.machengine.org`, and Zig's HTTP client fails the TLS handshake with that server on some machines. Download it with curl and place it in the Zig cache under the hash raylib pins:
+If Zig's HTTP client fails the TLS handshake with `pkg.machengine.org`, download the package with `curl` into the Zig global cache:
 
 ```bash
 H=N-V-__8AALShqgXkvqYU6f__FrA22SMWmi2TXCJjNTO1m8XJ
@@ -58,59 +78,49 @@ CACHE=$(zig env | sed -n 's/.*\.global_cache_dir = "\(.*\)",/\1/p')
 COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -czf "$CACHE/p/$H.tar.gz" $H
 ```
 
-Zig still checks the hash when it unpacks the package.
 </details>
 
 ## Controls
 
 | Input | Action |
 | --- | --- |
-| WASD / arrows, right-drag | Pan |
-| Mouse wheel | Zoom |
-| Click | Inspect an entity: senses, fly motor output, genes, live neuron activity |
-| C | Follow the selected entity |
-| B | Toggle the neuron view |
-| P | Overlay: trails and alarm / food scent / off |
-| F | Food level |
-| + / − | Speed (1–16×) |
-| Space | Pause |
-| R | New world |
+| `WASD` / arrows, right-drag | Pan camera |
+| Mouse wheel / `[` `]` / `0` | Zoom / fit whole world |
+| Left-click | Select & inspect an individual (genes, skills, live mind graph, mental map) |
+| `C` | Follow selected individual |
+| `B` | Toggle live brain visualization in Inspector |
+| `E` | Open **Experiment Controls** (Pure Neural toggle, spawning, food flood/wipe, weather, wildlife) |
+| `T` | Open **Specimen Lab** (capture, compare, edit traits/skills, mutate, clone) |
+| `G` | Open **History & Generations** panel |
+| `H` | Toggle territory corner brackets |
+| `L` | Toggle world legend / key |
+| `P` | Cycle chemical overlays (trails & alarm / food scent / off) |
+| `F` | Cycle food scarcity (`feast` / `abundant` / `normal` / `scarce` / `famine`) |
+| `+` / `-` | Simulation speed (`1×` up to `64×`) |
+| `Space` | Pause / resume |
+| `R` | Start a new world |
 
-## Project layout
+## Project Layout
 
-```
+```text
 sim/
-  src/flybrain.zig     fly circuit loader and rate model
-  src/genome.zig       genes, social network, crossover and mutation
-  src/pheromone.zig    diffusing chemical fields
-  src/world.zig        societies, food, sensing, behaviour, reproduction
-  src/main.zig         rendering, camera, UI
-  src/tests.zig
-  assets/flybrain.bin  extracted circuit (see below)
+  src/world.zig        societies, ecology, physics, wildlife, structures, tools, memory & learning
+  src/genome.zig       traits, growing recurrent CognitiveBrain, node-perturbation & ABCD plasticity
+  src/pheromone.zig    diffusing chemical fields (scent, trails, alarm)
+  src/flybrain.zig     embedded sensorimotor brainstem circuit rate model
+  src/logger.zig       automatic CSV telemetry exporter
+  src/life_view.zig    2D renderer, HUD, Inspector, Specimen Lab, Experiment Controls & History
+  src/ui.zig           Retina HiDPI helpers, font loading, camera & screenshot capture
+  src/main.zig         CLI entry point (interactive, --headless, --shot)
+  src/tests.zig        unit, online-learning, chemotaxis & multi-seed survival tests
+  assets/flybrain.bin  pre-built binary sensorimotor circuit
 tools/
-  extract_circuit.py   builds flybrain.bin from the FlyWire data
+  package_macos_app.sh builds native macOS .app bundle, /Applications install & .dmg
+  make_icon.py         generates Retina AppIcon.icns
+  analyze_run.py       summarizes CSV run telemetry (trait drift, skills, brain growth, roles)
+  extract_circuit.py   rebuilds sim/assets/flybrain.bin from source connectivity tables
 ```
 
-## Rebuilding the circuit
+## Credits & License
 
-`sim/assets/flybrain.bin` is checked in. To regenerate it, download the source tables (about 135 MB) and run the extractor:
-
-```bash
-mkdir -p data/flywire && cd data/flywire
-curl -LO https://raw.githubusercontent.com/philshiu/Drosophila_brain_model/main/Connectivity_783.parquet
-curl -LO https://raw.githubusercontent.com/philshiu/Drosophila_brain_model/main/Completeness_783.csv
-curl -L -o neuron_annotations.tsv https://raw.githubusercontent.com/flyconnectome/flywire_annotations/main/supplemental_files/Supplemental_file1_neuron_annotations.tsv
-cd ../..
-uv run --no-project --with numpy --with scipy --with pandas --with pyarrow python tools/extract_circuit.py
-```
-
-The extractor keeps the neurons on the strongest paths from the chosen sensory neurons to the chosen motor and descending neurons. Before writing the file, it runs a quick check that sugar drives feeding, bitter doesn't, and odour steers.
-
-## Data and credits
-
-The circuit is derived from FlyWire connectome release v783 and is distributed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (see [`sim/assets/DATA_LICENSE.md`](sim/assets/DATA_LICENSE.md)). Please cite:
-
-- Dorkenwald et al. (2024). Neuronal wiring diagram of an adult brain. *Nature*.
-- Schlegel et al. (2024). Whole-brain annotation and multi-connectome cell typing of *Drosophila*. *Nature*.
-- Shiu et al. (2024). A *Drosophila* computational brain model reveals sensorimotor processing. *Nature*. The connectivity table and the MN9 and sugar-neuron identities come from [philshiu/Drosophila_brain_model](https://github.com/philshiu/Drosophila_brain_model).
-- Cell-type annotations: [flyconnectome/flywire_annotations](https://github.com/flyconnectome/flywire_annotations).
+The bundled low-level sensorimotor brainstem data (`sim/assets/flybrain.bin`) is derived from [FlyWire](https://flywire.ai) connectome release v783 (Dorkenwald et al. 2024; Schlegel et al. 2024; Shiu et al. 2024) and is distributed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) — see [`sim/assets/DATA_LICENSE.md`](sim/assets/DATA_LICENSE.md) for full citations.
