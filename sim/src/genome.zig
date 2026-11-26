@@ -31,16 +31,16 @@ pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 ///   0 .. social_inputs-1                            : sensory, state, memory & egocentric directional inputs
 ///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable leaky recurrent hidden neurons
 ///   out_base .. out_base+action_outputs-1           : 8 discrete action outputs
-///   out_base+8 .. out_base+10                       : 3 continuous motor/modulatory outputs (turn, speed, internal neuromodulator)
-pub const social_inputs = 26;
+///   out_base+8 .. out_base+11                       : 4 continuous cortical outputs (turn, speed, neuromodulator, vocal call)
+pub const social_inputs = 28;
 pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
 pub const action_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
-pub const motor_outputs = 3; // turn_out, speed_out, mod_out
+pub const motor_outputs = 4; // turn_out, speed_out, mod_out, call_out
 pub const social_outputs = action_outputs + motor_outputs;
 pub const max_cog_hidden = 24;
 pub const out_base = social_inputs + max_cog_hidden;
 pub const max_cog_nodes = out_base + social_outputs;
-pub const max_cog_synapses = 288;
+pub const max_cog_synapses = 320;
 
 pub const Synapse = struct {
     from: u8,
@@ -66,7 +66,7 @@ pub const CognitiveBrain = struct {
     hebb_b: f32 = 0.0,
     hebb_c: f32 = 0.0,
     hebb_d: f32 = -0.04,
-    hebb_lr: f32 = 0.045,
+    hebb_lr: f32 = 0.065,
     /// Runtime activations (hidden neurons carry leaky recurrent working memory).
     act: [max_cog_nodes]f32 = @splat(0),
     /// Decaying pre*post eligibility traces for TD + ABCD plasticity.
@@ -75,6 +75,7 @@ pub const CognitiveBrain = struct {
     turn_out: f32 = 0, // -1..+1 direct continuous steering torque
     speed_out: f32 = 0, // -1..+1 direct continuous speed modulation
     mod_out: f32 = 0, // -1..+1 evolved internal neuromodulatory gate
+    call_out: f32 = 0, // -1..+1 neural vocalization/signal drive (> 0.45 broadcasts)
     /// Dynamic neuromodulators (runtime internal state).
     dopamine: f32 = 0.5, // reward surprise / motivation -> boosts plasticity
     noradrenaline: f32 = 0.2, // arousal / vigilance -> speeds thinking & adaptation
@@ -111,7 +112,7 @@ pub const CognitiveBrain = struct {
             .hebb_b = std.math.clamp(rng.floatNorm(f32) * 0.12, -0.8, 0.8),
             .hebb_c = std.math.clamp(rng.floatNorm(f32) * 0.12, -0.8, 0.8),
             .hebb_d = std.math.clamp(-0.04 + rng.floatNorm(f32) * 0.03, -0.3, 0.1),
-            .hebb_lr = std.math.clamp(0.045 + rng.floatNorm(f32) * 0.015, 0.005, 0.12),
+            .hebb_lr = std.math.clamp(0.065 + rng.floatNorm(f32) * 0.02, 0.005, 0.15),
         };
         for (&b.bias) |*v| v.* = rng.floatNorm(f32) * 0.25;
         for (0..b.hidden_count) |hi| b.pred_w[hi] = rng.floatNorm(f32) * 0.2;
@@ -124,20 +125,33 @@ pub const CognitiveBrain = struct {
         // Keep initial cortical turn/speed biases near zero so Gen 1 founders inherit clean FlyWire steering.
         b.bias[max_cog_hidden + action_outputs + 0] = 0;
         b.bias[max_cog_hidden + action_outputs + 1] = 0;
+        b.bias[max_cog_hidden + action_outputs + 3] = -0.2;
 
         // Compact starter wiring: sparse input -> hidden, hidden -> output, and 2 starter recurrent memory loops.
         for (0..b.hidden_count) |hi| {
             const h_node: u8 = @intCast(social_inputs + hi);
             for (0..social_inputs) |ii| {
-                if (rng.float(f32) < 0.34) {
+                if (rng.float(f32) < 0.32) {
                     _ = b.insertSynapse(@intCast(ii), h_node, rng.floatNorm(f32) * 0.50);
                 }
             }
             for (0..social_outputs) |oi| {
                 const o_node: u8 = @intCast(out_base + oi);
-                const scale: f32 = if (oi >= action_outputs) 0.22 else 0.52;
+                const scale: f32 = if (oi >= action_outputs) 0.06 else 0.52;
                 _ = b.insertSynapse(h_node, o_node, rng.floatNorm(f32) * scale);
             }
+        }
+        // Seed sparse random zero-mean direct sensorimotor synapses (no hardcoded sign!) so
+        // 3-factor ABCD Hebbian plasticity & evolution can rapidly tune steering, speed, and calling.
+        const turn_node: u8 = @intCast(out_base + action_outputs + 0);
+        const speed_node: u8 = @intCast(out_base + action_outputs + 1);
+        const call_node: u8 = @intCast(out_base + action_outputs + 3);
+        for (20..social_inputs) |ii| {
+            _ = b.insertSynapse(@intCast(ii), turn_node, rng.floatNorm(f32) * 0.10);
+        }
+        for ([_]u8{ 0, 3, 8, 15, 18, 26 }) |ii| {
+            _ = b.insertSynapse(ii, speed_node, rng.floatNorm(f32) * 0.10);
+            _ = b.insertSynapse(ii, call_node, rng.floatNorm(f32) * 0.12);
         }
         // Seed initial recurrent working-memory loops between hidden neurons.
         for (0..2) |_| {
@@ -163,7 +177,7 @@ pub const CognitiveBrain = struct {
             .hebb_b = std.math.clamp((a.hebb_b + b_parent.hebb_b) * 0.5 + mutation(rng, rate, 0.08), -0.8, 0.8),
             .hebb_c = std.math.clamp((a.hebb_c + b_parent.hebb_c) * 0.5 + mutation(rng, rate, 0.08), -0.8, 0.8),
             .hebb_d = std.math.clamp((a.hebb_d + b_parent.hebb_d) * 0.5 + mutation(rng, rate, 0.025), -0.3, 0.1),
-            .hebb_lr = std.math.clamp((a.hebb_lr + b_parent.hebb_lr) * 0.5 + mutation(rng, rate, 0.008), 0.005, 0.12),
+            .hebb_lr = std.math.clamp((a.hebb_lr + b_parent.hebb_lr) * 0.5 + mutation(rng, rate, 0.01), 0.005, 0.15),
         };
         for (&c.bias, secondary.bias) |*bv, sv| {
             const pick = if (rng.boolean()) bv.* else sv;
@@ -185,8 +199,8 @@ pub const CognitiveBrain = struct {
         }
 
         // Structural evolution: synaptogenesis (including recurrent loops), neurogenesis, and pruning.
-        if (rng.float(f32) < 0.20) _ = c.addRandomSynapse(rng);
-        if (rng.float(f32) < 0.10) _ = c.addNeuron(rng);
+        if (rng.float(f32) < 0.26) _ = c.addRandomSynapse(rng);
+        if (rng.float(f32) < 0.12) _ = c.addNeuron(rng);
         if (rng.float(f32) < 0.10) c.pruneWeak();
         return c;
     }
@@ -335,19 +349,20 @@ pub const CognitiveBrain = struct {
                     0 => b.turn_out = val,
                     1 => b.speed_out = val,
                     2 => b.mod_out = val,
+                    3 => b.call_out = val,
                     else => {},
                 }
             }
         }
 
-        // Update decaying Hebbian eligibility traces (pre * post).
+        // Update decaying Hebbian eligibility traces (1.7s distal reward window, Izhikevich 2007).
         for (b.synapses[0..b.synapse_count], b.elig[0..b.synapse_count]) |s, *el| {
             if (!s.active) {
                 el.* = 0;
                 continue;
             }
             const pre = if (s.isRecurrent()) prev_h[s.from - social_inputs] else b.act[s.from];
-            el.* = 0.72 * el.* + 0.28 * pre * b.act[s.to];
+            el.* = 0.90 * el.* + 0.10 * pre * b.act[s.to];
         }
 
         return @fromBackingInt(@intCast(best));

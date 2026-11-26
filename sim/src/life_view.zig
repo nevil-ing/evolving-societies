@@ -732,7 +732,14 @@ fn drawHud(app: *App) !void {
     text(100, 25, 13, rgb(170, 175, 190), "{s} x{d}", .{ if (app.paused) "PAUSED" else "running", speeds[app.speed] });
     drawPhaseBadge(210, 24, w.phase, sim.phaseRemaining(w.phaseClock()));
     text(24, 50, 14, rgb(200, 200, 215), "Population {d}   Max generation {d}", .{ total, w.max_generation });
-    text(24, 70, 14, rgb(200, 200, 215), "Food: {s}   Overlay: {s}", .{ @tagName(w.scarcity), @tagName(app.overlay) });
+    text(24, 70, 13, rgb(200, 200, 215), "Food: {s}   Overlay: {s}", .{ @tagName(w.scarcity), @tagName(app.overlay) });
+    if (w.pure_neural) {
+        rl.DrawRectangleRounded(rect(210, 69, 92, 16), 0.4, 4, rgb(52, 38, 88));
+        text(216, 71, 10, rgb(195, 165, 255), "PURE NEURAL", .{});
+    } else {
+        rl.DrawRectangleRounded(rect(224, 69, 78, 16), 0.4, 4, rgb(36, 44, 64));
+        text(234, 71, 10, rgb(165, 185, 215), "ASSISTED", .{});
+    }
 
     // Top-center civilization alert / updates bar (click or press G for full log & generations).
     drawAlertBar(app, sw);
@@ -1175,7 +1182,7 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     const px = (sw - pw) * 0.5;
     if (px < 322) return;
     const py: f32 = 52;
-    const ph: f32 = 398;
+    const ph: f32 = 432;
     panel(px, py, pw, ph);
 
     var y = py + 12;
@@ -1309,8 +1316,14 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     if (smallBtn(rect(px + 312, y, 196, 24), "Inspire Pioneers (+Build/Tool)", rgb(44, 76, 86))) {
         w.inspirePioneers();
     }
+    y += 32;
+    const mode_label = if (w.pure_neural) "Brain: PURE NEURAL (0 autopilot)" else "Brain: Assisted (steerTo helpers)";
+    const mode_col = if (w.pure_neural) rgb(72, 46, 114) else rgb(44, 56, 82);
+    if (smallBtn(rect(px + 14, y, 252, 24), mode_label, mode_col)) {
+        w.pure_neural = !w.pure_neural;
+    }
     y += 30;
-    text(px + 14, y, 10, rgb(140, 148, 165), "By default societies start at 0% build/tool skill and figure it out on their own. Use Inspire to seed pioneers.", .{});
+    text(px + 14, y, 10, rgb(140, 148, 165), "Pure Neural removes all steerTo autopilots: movement & calls come 100% from FlyWire + evolved recurrent cortex.", .{});
 }
 
 fn smallBtn(r: rl.Rectangle, label: []const u8, base_col: rl.Color) bool {
@@ -1705,8 +1718,8 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
             cog.dopamine, cog.noradrenaline, cog.serotonin, e.activeMemories(), e.bondCount(),
         });
         y += 13;
-        text(x + 12, y, 10, rgb(185, 165, 225), "Hebb A {d:.2}  lr {d:.3}   turn {d:.2}  spd {d:.2}  mod {d:.2}", .{
-            cog.hebb_a, cog.hebb_lr, cog.turn_out, cog.speed_out, cog.mod_out,
+        text(x + 12, y, 10, rgb(185, 165, 225), "Hebb A {d:.2} lr {d:.3}  t {d:.2} s {d:.2} m {d:.2} c {d:.2}", .{
+            cog.hebb_a, cog.hebb_lr, cog.turn_out, cog.speed_out, cog.mod_out, cog.call_out,
         });
         y += 14;
         drawCognitiveGraph(cog, x + 12, y, 276, 54);
@@ -1785,7 +1798,8 @@ fn drawCognitiveGraph(cog: *const gen.CognitiveBrain, x: f32, y: f32, w: f32, h:
         else switch (oi - gen.action_outputs) {
             0 => rgb(255, 215, 90), // turn_out
             1 => rgb(95, 235, 255), // speed_out
-            else => rgb(235, 115, 255), // mod_out (evolved neuromodulator)
+            2 => rgb(235, 115, 255), // mod_out (evolved neuromodulator)
+            else => rgb(115, 245, 175), // call_out (neural vocalization)
         };
         rl.DrawCircleV(pos[idx], 3.0, withAlpha(col, 110 + @as(u8, @intFromFloat(a * 145))));
     }

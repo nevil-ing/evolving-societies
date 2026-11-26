@@ -306,9 +306,10 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
     // Run a decision then apply positive reward: weights, predictor, continuous outputs, and dopamine should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2 });
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0 });
+    try std.testing.expect(@abs(brain.call_out) <= 1.0);
     // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
-    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     var hidden_mag: f32 = 0;
     for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
     try std.testing.expect(hidden_mag > 1e-3);
@@ -333,6 +334,7 @@ test "world: starving entity spots nearby food visually and eats instead of idli
     const c = try fly.Circuit.parse(arena.allocator(), blob);
 
     var w = try World.init(gpa, &c, 314);
+    w.pure_neural = false;
     w.resources.clearRetainingCapacity();
     w.patches.clearRetainingCapacity();
     w.field.clear();
@@ -388,6 +390,7 @@ test "world: food call recruits distant hungry kin toward shared food" {
     const c = try fly.Circuit.parse(arena.allocator(), blob);
 
     var w = try World.init(gpa, &c, 808);
+    w.pure_neural = false;
     w.resources.clearRetainingCapacity();
     w.patches.clearRetainingCapacity();
     w.field.clear();
@@ -412,6 +415,8 @@ test "world: food call recruits distant hungry kin toward shared food" {
     kin.energy = 50;
     kin.pos = .{ .x = 160, .y = 0 };
     kin.heading = 0; // facing away from the food!
+    kin.genome.traits[@backingInt(gen.Trait.speed)] = 0.75;
+    kin.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.forage)] = 3.0;
 
     try w.resources.append(gpa, .{ .pos = .{ .x = 2, .y = 0 }, .food = .plant, .amount = 40, .patch = null });
     for (0..60 * 3) |_| try w.step(1.0 / 60.0);
@@ -489,6 +494,7 @@ test "world: starvation cannibalism emerges when all food is removed" {
     const c = try fly.Circuit.parse(arena.allocator(), blob);
 
     var w = try World.init(gpa, &c, 911);
+    w.pure_neural = false;
     w.clearAllFood();
     while (w.entities.items.len > 2) {
         const last = w.entities.pop().?;
@@ -505,7 +511,12 @@ test "world: starvation cannibalism emerges when all food is removed" {
     hunter.genome.traits[@backingInt(gen.Trait.aggression)] = 0.92;
     hunter.genome.traits[@backingInt(gen.Trait.speed)] = 0.85;
     hunter.genome.motor[@backingInt(gen.MotorGene.feed_threshold)] = 0.25;
-    hunter.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.fight)] = 3.5;
+    // Wire fight selectively to enemy presence (input 3) so once kin falls, hunter switches back to foraging the corpse.
+    hunter.genome.cog.synapse_count = 0;
+    hunter.genome.cog.bias = @splat(0);
+    hunter.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.forage)] = 1.0;
+    hunter.genome.cog.synapses[0] = .{ .from = 3, .to = gen.out_base + @backingInt(gen.SocialAction.fight), .weight = 4.0, .active = true };
+    hunter.genome.cog.synapse_count = 1;
     for (hunter.genome.fly_gain) |*g| g.* = 1.0;
 
     const prey = &w.entities.items[1];
@@ -536,6 +547,7 @@ test "world: entities craft stone spears and hunt wild prey for a rich harvest" 
     const c = try fly.Circuit.parse(arena.allocator(), blob);
 
     var w = try World.init(gpa, &c, 2027);
+    w.pure_neural = false;
     w.clearAllFood();
     w.prey.clearRetainingCapacity();
     w.predators.clearRetainingCapacity();
@@ -621,6 +633,7 @@ test "world: episodic memory guides navigation, updates stale beliefs, and share
     const c = try fly.Circuit.parse(arena.allocator(), blob);
 
     var w = try World.init(gpa, &c, 2029);
+    w.pure_neural = false;
     w.clearAllFood();
     w.prey.clearRetainingCapacity();
     while (w.entities.items.len > 2) {
@@ -763,4 +776,61 @@ test "world: wildlife collisions are solid, shelters block predators, and rivals
     try std.testing.expect(w.predators.items[0].pos.dist(w.structures.items[0].pos) >= w.structures.items[0].radius() + w.predators.items[0].radius() - 0.5);
     try std.testing.expect(w.structures.items[1].stored_food < 99.0);
     try std.testing.expect(w.stats[1].raids_suffered >= 1);
+}
+
+test "world: pure neural mode defaults on and steers and vocalizes from cortical weights" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 8080);
+    try std.testing.expect(w.pure_neural);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    w.structures.clearRetainingCapacity();
+    while (w.entities.items.len > 1) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    // Place a predator to the entity's left (positive egocentric bearing at y = +60 when heading = 0).
+    try w.predators.append(gpa, .{ .pos = .{ .x = 0, .y = 60 }, .heading = 0 });
+
+    const e = &w.entities.items[0];
+    e.society = 1;
+    e.age = sim.maturity_age + 20;
+    e.energy = 100;
+    e.pos = .{ .x = 0, .y = 0 };
+    e.heading = 0;
+    e.genome.motor[@backingInt(gen.MotorGene.turn)] = 0;
+    e.genome.motor[@backingInt(gen.MotorGene.wander)] = 0;
+    // Clear starter synapses and wire a single direct cortical connection: dir_threat (21) -> turn_out (out_base + 8).
+    e.genome.cog.synapse_count = 0;
+    e.genome.cog.bias = @splat(0);
+    e.genome.cog.synapses[0] = .{ .from = 21, .to = gen.out_base + gen.action_outputs + 0, .weight = 3.0, .active = true };
+    e.genome.cog.synapse_count = 1;
+    // Silence call_out first: must NOT emit any signal despite nearby predator!
+    e.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 3] = -4.0;
+    e.action_timer = 0.12; // run decide() right after first 10Hz think() senses the predator
+
+    for (0..22) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items[0].heading > 0.1);
+    try std.testing.expectEqual(@as(u32, 0), w.stats[1].signals_sent);
+
+    // Flip the cortical synapse weight negative and drive call_out > 0.45: entity must turn opposite way and vocalize!
+    const e2 = &w.entities.items[0];
+    e2.pos = .{ .x = 0, .y = 0 };
+    e2.heading = 0;
+    e2.action_timer = 0.12;
+    e2.call_cooldown = 0;
+    e2.genome.cog.synapses[0].weight = -3.0;
+    e2.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 3] = 4.0;
+    w.predators.items[0].pos = .{ .x = 0, .y = 60 };
+
+    for (0..22) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items[0].heading < -0.1);
+    try std.testing.expect(w.stats[1].signals_sent >= 1);
 }

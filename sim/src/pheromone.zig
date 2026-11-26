@@ -13,7 +13,7 @@ pub const Channel = struct {
 
 pub fn channelFor(kind: Kind) Channel {
     return switch (kind) {
-        .scent => .{ .kind = kind, .evaporation = 0.5, .diffusion = 25.0 },
+        .scent => .{ .kind = kind, .evaporation = 0.35, .diffusion = 28.0 },
         .trail => .{ .kind = kind, .evaporation = 0.05, .diffusion = 0.4 },
         .alarm => .{ .kind = kind, .evaporation = 0.35, .diffusion = 15.0 },
     };

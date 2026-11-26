@@ -578,6 +578,10 @@ pub const World = struct {
     grid_head: [grid_cells]i32 = @splat(-1),
     grid_next: std.ArrayList(i32) = .empty,
     threads: usize,
+    /// Zero-scaffolding Pure Neural mode (default ON): movement & calls come purely from
+    /// FlyWire brainstem + recurrent CognitiveBrain continuous outputs (turn_out/speed_out/call_out),
+    /// with zero steerTo autopilot overrides. Toggleable in Exp (E) to compare against Assisted mode.
+    pure_neural: bool = true,
     /// Skip the social network and always forage (used by tests).
     forage_only: bool = false,
 
@@ -648,7 +652,7 @@ pub const World = struct {
             for (0..3) |_| try w.addPatch(s.food, s.territory.inset(30), @intCast(si));
             try w.addPatch(.universal, s.territory.inset(30), @intCast(si));
         }
-        for (0..6) |_| try w.addPatch(.universal, wild, null);
+        for (0..8) |_| try w.addPatch(.universal, wild, null);
         for ([_]FoodType{ .meat, .plant, .mineral }) |t| try w.addPatch(t, wild, null);
         for (w.patches.items, 0..) |*p, i| {
             while (p.live < patch_items) try w.spawnFood(p, @intCast(i));
@@ -677,10 +681,10 @@ pub const World = struct {
         for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .wood, .amount = 45 });
         for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .stone, .amount = 45 });
         try w.spawnPrey(5);
-        try w.spawnPredators(2);
+        try w.spawnPredators(1);
     }
 
-    const patch_items = 8;
+    const patch_items = 9;
     const food_amount: f32 = 40;
 
     fn addPatch(w: *World, food: FoodType, area: Rect, owner: ?u8) !void {
@@ -1181,7 +1185,7 @@ pub const World = struct {
                     w.field.deposit(alarmChannel(target_e.society), target_e.pos.x, target_e.pos.y, dmg * 0.9);
                     if (target_e.energy <= 0 and target_e.dead == null) {
                         p.kills += 1;
-                        p.sated_timer = 22; // digest kill before stalking again
+                        p.sated_timer = 32; // digest kill before stalking again
                         p.energy = @min(140, p.energy + 45);
                         p.hp = @min(p.max_hp, p.hp + 25);
                         try w.killCorpse(ti, .killed, 18);
@@ -1194,6 +1198,10 @@ pub const World = struct {
 
             p.pos.x += @cos(p.heading) * spd * dt;
             p.pos.y += @sin(p.heading) * spd * dt;
+            // Stalking predators radiate biological predator musk into the FlyWire alarm channels (orn_alarm_L/R).
+            for (0..society_count) |sc| {
+                w.field.deposit(alarmChannel(sc), p.pos.x, p.pos.y, 1.2 * dt);
+            }
             if (!edge.contains(p.pos)) {
                 p.pos.x = std.math.clamp(p.pos.x, edge.x, edge.x + edge.w);
                 p.pos.y = std.math.clamp(p.pos.y, edge.y, edge.y + edge.h);
@@ -1583,12 +1591,15 @@ pub const World = struct {
             g.cog.dopamine = std.math.clamp(g.cog.dopamine + (0.5 - g.cog.dopamine) * @min(1, dt * 0.25), 0.05, 1.0);
         }
 
-        // Social decision (26 egocentric/sensory/memory inputs -> leaky recurrent hidden state -> 8 actions + 3 continuous motor/mod outputs).
-        // Thinking tempo adapts dynamically: alert/aroused entities deliberate faster in crisis!
+        // Social decision (28 egocentric/sensory/memory inputs -> leaky recurrent hidden state -> 8 actions + 4 continuous cortical outputs).
+        // In Pure Neural mode, the cortex runs at 5.5-10 Hz for responsive closed-loop neural steering!
         const home_rect = w.territories[e.society];
         e.action_timer -= dt;
         if (e.action_timer <= 0 and !w.forage_only) {
-            e.action_timer = 0.55 - 0.30 * g.cog.noradrenaline;
+            e.action_timer = if (w.pure_neural)
+                0.18 - 0.08 * g.cog.noradrenaline
+            else
+                0.55 - 0.30 * g.cog.noradrenaline;
             const env_sig: f32 = if (w.phase == .storm and !e.in_shelter)
                 1.0
             else if (e.in_shelter)
@@ -1657,6 +1668,8 @@ pub const World = struct {
                 0;
 
             const dir_home: f32 = egocentricBearing(e.heading, e.pos, home_rect.center());
+            const heard_cue: f32 = if (e.heard_kind) |hk| (if (hk == .danger_call) @as(f32, -1.0) else 1.0) else 0;
+            const dir_heard: f32 = if (e.heard_kind != null) egocentricBearing(e.heading, e.pos, e.heard_pos) else 0;
 
             e.action = g.decide(.{
                 e.energy / max_energy,
@@ -1685,6 +1698,8 @@ pub const World = struct {
                 dir_material,
                 dir_structure,
                 dir_home,
+                heard_cue,
+                dir_heard,
             });
         }
 
@@ -1696,16 +1711,16 @@ pub const World = struct {
             e.action = .forage;
         }
         const hunting_prey = !w.forage_only and lstage != .infant and e.near_prey != null and e.near_predator == null and e.enemy == null and
-            (e.action == .fight or (e.tool == .spear and e.action == .forage and e.visible_food == null and e.energy < 95));
+            (e.action == .fight or (!w.pure_neural and e.tool == .spear and e.action == .forage and e.visible_food == null and e.energy < 95));
 
-        // Steering blends the FlyWire brainstem with continuous cortical steering (g.cog.turn_out).
-        // A slow baseline is subtracted to cancel the connectome's built-in left/right bias.
+        // Steering: in Pure Neural mode, steering comes 100% from FlyWire brainstem + continuous cortical turn_out
+        // with ZERO steerTo autopilot! In Assisted mode, steerTo helpers assist chosen actions.
         const m = e.motor;
         const turn_diff = m.turn_R - m.turn_L;
         e.turn_base += (turn_diff - e.turn_base) * @min(1, dt / 1.5);
         var turn = std.math.clamp(g.motorGene(.turn) * (turn_diff - e.turn_base), -6, 6) + g.motorGene(.wander) * w.rng().floatNorm(f32);
-        if (!w.forage_only) turn += g.cog.turn_out * 3.5;
-        const target: ?Vec2 = if (hunting_prey)
+        if (!w.forage_only) turn += g.cog.turn_out * (if (w.pure_neural) @as(f32, 4.2) else 3.5);
+        const target: ?Vec2 = if (w.pure_neural) null else if (hunting_prey)
             w.prey.items[e.near_prey.?].pos
         else switch (e.action) {
             .forage => null,
@@ -1727,9 +1742,9 @@ pub const World = struct {
             if (e.heard_timer <= 0) e.heard_kind = null;
         }
 
-        // Act on heard signals from kin (food calls, danger warnings, storm rallies, mate calls).
+        // Act on heard signals from kin (Assisted mode only; in Pure Neural mode heard_cue/dir_heard go straight into the brain!).
         var acted_on_signal = false;
-        if (!w.forage_only) {
+        if (!w.forage_only and !w.pure_neural) {
             if (e.heard_kind) |hk| {
                 const d_sig = e.pos.dist(e.heard_pos);
                 switch (hk) {
@@ -1775,7 +1790,8 @@ pub const World = struct {
             }
         }
 
-        // Storm comfort/exposure signal feeds directly into ABCD Hebbian learning instead of hardcoding storm steering.
+        // Storm comfort/exposure and predator proximity stress feed directly into ABCD Hebbian learning
+        // instead of hardcoding storm or flee steering.
         var seeking_shelter = false;
         if (!w.forage_only and w.phase == .storm) {
             if (e.in_shelter or e.huddled) {
@@ -1784,10 +1800,13 @@ pub const World = struct {
                 g.cog.learn(-0.04 * dt);
             }
         }
+        if (!w.forage_only and e.near_predator != null and e.predator_dist < 75 and !e.in_shelter) {
+            g.cog.learn(-0.03 * dt);
+        }
 
-        // Hungry entities with no food in sight can steer toward a stocked society Food Cache.
+        // Hungry entities with no food in sight can steer toward a stocked society Food Cache (Assisted mode only).
         var seeking_cache = false;
-        if (!w.forage_only and !acted_on_signal and !seeking_shelter and target == null and e.action == .forage and e.visible_food == null and e.energy < 60) {
+        if (!w.forage_only and !w.pure_neural and !acted_on_signal and !seeking_shelter and target == null and e.action == .forage and e.visible_food == null and e.energy < 60) {
             if (e.near_cache) |ci| {
                 const cache = w.structures.items[ci];
                 if (cache.stored_food > 5) {
@@ -1798,9 +1817,23 @@ pub const World = struct {
             }
         }
 
-        // Episodic Spatial Memory Recall & Belief Updating: navigate by mental map when nothing is locally visible.
+        // Episodic Spatial Memory Recall & Belief Updating:
+        // In Pure Neural mode, memories feed into dir_food/dir_material/dir_structure/dir_threat with ZERO steerTo autopilot,
+        // while stale memories still clear when the creature physically arrives and sees them empty!
         e.recalling = null;
-        if (!w.forage_only and !acted_on_signal and !seeking_shelter and !seeking_cache and target == null) {
+        if (!w.forage_only and w.pure_neural) {
+            for (&e.memories) |*mem| {
+                if (mem.confidence <= 0.15) continue;
+                if (mem.kind == .food and e.visible_food == null and e.pos.dist(mem.pos) < 26) {
+                    mem.confidence = 0;
+                    g.cog.learn(-0.18);
+                } else if (mem.kind == .material and e.near_material == null and e.pos.dist(mem.pos) < 28) {
+                    mem.confidence = 0;
+                } else if (mem.kind == .shelter and !e.in_shelter and e.pos.dist(mem.pos) < 28) {
+                    mem.confidence = 0;
+                }
+            }
+        } else if (!w.forage_only and !acted_on_signal and !seeking_shelter and !seeking_cache and target == null) {
             // 1. Storm shelter recall (even from far across the world).
             if (w.phase == .storm and !e.in_shelter and e.energy > 48 and e.action != .fight and e.action != .flee) {
                 if (e.recall(.shelter, 0.25)) |mi| {
@@ -1866,7 +1899,7 @@ pub const World = struct {
             }
         }
 
-        if (!w.forage_only and !acted_on_signal and !seeking_shelter and !seeking_cache and e.recalling == null and target == null and e.action == .forage) {
+        if (!w.forage_only and !w.pure_neural and !acted_on_signal and !seeking_shelter and !seeking_cache and e.recalling == null and target == null and e.action == .forage) {
             if (e.visible_food) |fpos| {
                 // Visual lock onto nearby edible food when odour is faint or entity is hungry.
                 if (e.odour < 0.14 or e.energy < 70) {
@@ -1914,7 +1947,7 @@ pub const World = struct {
             e.explore_target = null;
         }
 
-        if (e.explore_target == null and !seeking_shelter and !seeking_cache and e.recalling == null and !acted_on_signal and e.visible_food == null and target == null) {
+        if (!w.pure_neural and e.explore_target == null and !seeking_shelter and !seeking_cache and e.recalling == null and !acted_on_signal and e.visible_food == null and target == null) {
             const stage_roam: f32 = if (lstage == .infant) 0.3 else if (lstage == .juvenile) 0.65 else 1.0;
             const roam = (160 + 600 * (1 - g.trait(.territoriality)) + 500 * hunger) * stage_roam;
             const home = home_rect.inset(-roam);
@@ -1941,16 +1974,22 @@ pub const World = struct {
 
         // Speed: DNp09 drives walking, MDN backs up, the giant fibre bolts, MN9 stops to feed.
         const base = 30 + 40 * g.trait(.speed);
-        var speed = base * (0.5 + g.motorGene(.forward) * m.fwd);
+        const walk_base: f32 = if (w.pure_neural and !w.forage_only) 0.55 else 0.5;
+        var speed = base * (walk_base + g.motorGene(.forward) * m.fwd);
         if (m.back > 0.3) speed = -0.4 * base;
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
-        if (e.action == .flee and (e.enemy != null or e.near_predator != null)) speed = base * 1.2;
-        if (hunting_prey or (e.action == .fight and (e.enemy != null or e.near_predator != null))) speed = @max(speed, base * 1.12);
-        if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or seeking_cache or e.recalling != null or acted_on_signal or target != null) {
-            speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
+        if (!w.pure_neural) {
+            if (e.action == .flee and (e.enemy != null or e.near_predator != null)) speed = base * 1.2;
+            if (hunting_prey or (e.action == .fight and (e.enemy != null or e.near_predator != null))) speed = @max(speed, base * 1.12);
+            if ((e.explore_target != null and e.odour < 0.25) or e.visible_food != null or seeking_shelter or seeking_cache or e.recalling != null or acted_on_signal or target != null) {
+                speed = @max(speed, base * (if (e.energy < 55) @as(f32, 1.05) else 0.95));
+            }
         }
-        if (!w.forage_only) speed *= std.math.clamp(1.0 + 0.30 * g.cog.speed_out, 0.55, 1.35);
+        if (!w.forage_only) speed *= if (w.pure_neural)
+            std.math.clamp(1.0 + 0.55 * g.cog.speed_out, 0.25, 1.55)
+        else
+            std.math.clamp(1.0 + 0.30 * g.cog.speed_out, 0.55, 1.35);
         if (e.carrying != .none) speed *= 0.88;
         speed *= switch (lstage) {
             .infant => 0.72,
@@ -1994,22 +2033,37 @@ pub const World = struct {
                     e.genome.cog.learn(gained * 0.06);
                     if (!w.forage_only and r.amount > 6) e.remember(.food, r.pos, 0.75);
                     if (w.rng().float(f32) < bite * 0.006) _ = e.genome.cog.sproutFromExperience(w.rng());
-                    // Food Call (waggle-dance style): share rich food locations with hungry kin nearby.
-                    if (!w.forage_only and r.amount > 12 and e.call_cooldown <= 0 and (g.trait(.sociability) > 0.35 or e.skill(.care) > 0.2)) {
+                    // Food Call: in Pure Neural mode, only broadcast if the brain fires call_out > 0.45!
+                    const want_food_call = if (w.pure_neural) g.cog.call_out > 0.45 else (g.trait(.sociability) > 0.35 or e.skill(.care) > 0.2);
+                    if (!w.forage_only and r.amount > 12 and e.call_cooldown <= 0 and want_food_call) {
                         w.emitSignal(i, .food_found, r.pos);
                     }
                 }
             }
         }
 
-        // Other active society calls: danger warning (only when closely surrounded), storm rally, courtship call.
+        // Society vocalization: in Pure Neural mode, calls fire ONLY when the brain's call_out neuron exceeds 0.45!
         if (!w.forage_only and e.call_cooldown <= 0) {
-            if (e.enemies_near >= 3 and e.enemy_dist < 48) {
-                if (e.enemy) |ei| w.emitSignal(i, .danger_call, w.entities.items[ei].pos);
-            } else if (w.phase == .storm and e.huddled and (e.role() == .elder or e.role() == .caretaker or g.trait(.sociability) > 0.5)) {
-                w.emitSignal(i, .storm_rally, e.pos);
-            } else if (e.readyToMate() and e.mate == null and e.energy > 95 and g.trait(.sociability) > 0.4) {
-                w.emitSignal(i, .mate_call, e.pos);
+            if (w.pure_neural) {
+                if (g.cog.call_out > 0.45) {
+                    if (e.near_predator) |pi| {
+                        w.emitSignal(i, .danger_call, w.predators.items[pi].pos);
+                    } else if (e.enemy) |ei| {
+                        w.emitSignal(i, .danger_call, w.entities.items[ei].pos);
+                    } else if (w.phase == .storm) {
+                        w.emitSignal(i, .storm_rally, e.pos);
+                    } else if (e.readyToMate()) {
+                        w.emitSignal(i, .mate_call, e.pos);
+                    }
+                }
+            } else {
+                if (e.enemies_near >= 3 and e.enemy_dist < 48) {
+                    if (e.enemy) |ei| w.emitSignal(i, .danger_call, w.entities.items[ei].pos);
+                } else if (w.phase == .storm and e.huddled and (e.role() == .elder or e.role() == .caretaker or g.trait(.sociability) > 0.5)) {
+                    w.emitSignal(i, .storm_rally, e.pos);
+                } else if (e.readyToMate() and e.mate == null and e.energy > 95 and g.trait(.sociability) > 0.4) {
+                    w.emitSignal(i, .mate_call, e.pos);
+                }
             }
         }
         // Physical crosswind during storms (completed shelters block 90%, huddled kin block 80%).
@@ -2067,7 +2121,7 @@ pub const World = struct {
             .adult => 1.0,
             .elder => 0.92,
         };
-        const drain = (0.5 + 0.6 * g.trait(.speed) - 0.4 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult * stage_drain;
+        const drain = (0.38 + 0.55 * g.trait(.speed) - 0.35 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult * stage_drain;
         e.energy -= drain * dt;
         if (e.energy < 25) e.genome.cog.learn(-0.08 * dt);
 
