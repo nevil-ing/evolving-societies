@@ -79,6 +79,12 @@ def main():
             f"    {'cog neurons':<15} {f(first, 'avg_neurons'):5.1f}  -> {f(last, 'avg_neurons'):5.1f}  "
             f"| synapses {f(first, 'avg_synapses'):5.1f} -> {f(last, 'avg_synapses'):5.1f}{rec_str}"
         )
+        if "avg_digest_m" in last:
+            print(
+                f"  Diet & morphology: meat={f(last, 'avg_digest_m')*100:.0f}% "
+                f"plant={f(last, 'avg_digest_p')*100:.0f}% mineral={f(last, 'avg_digest_x')*100:.0f}% "
+                f"| body_scale=x{f(last, 'avg_scale'):.2f} | active_clades={end.get('active_clades', '?')}"
+            )
         print(
             f"  Spatial & storm response: outside_home={f(last, 'outside_home_frac')*100:.0f}% | "
             f"huddling calm={calm_hud*100:.0f}% vs storm={storm_hud*100:.0f}%"

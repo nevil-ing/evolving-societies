@@ -384,6 +384,25 @@ fn drawWorld(app: *App) void {
         .storm => rgb(13, 16, 30),
     };
     rl.DrawRectangleRec(rect(b.x, b.y, b.w, b.h), bg_col);
+    // Subtle living soil backdrop: fertile nutrient-rich loam glows faint moss-earth,
+    // depleted ground stays dark slate, and heavy organic waste shows warm amber tint.
+    for (0..sim.grid_rows) |gy_i| {
+        for (0..sim.grid_cols) |gx_i| {
+            const ci = gy_i * sim.grid_cols + gx_i;
+            const nut = w.soil_nutrients[ci];
+            const wst = w.waste[ci];
+            const cx = b.x + @as(f32, @floatFromInt(gx_i)) * sim.grid_cell;
+            const cy = b.y + @as(f32, @floatFromInt(gy_i)) * sim.grid_cell;
+            if (nut > 0.55) {
+                const a: u8 = @intFromFloat(std.math.clamp((nut - 0.55) * 20.0, 0, 26));
+                rl.DrawRectangleRec(rect(cx, cy, sim.grid_cell, sim.grid_cell), withAlpha(rgb(42, 92, 62), a));
+            }
+            if (wst > 0.25) {
+                const wa: u8 = @intFromFloat(std.math.clamp((wst - 0.25) * 28.0, 0, 32));
+                rl.DrawRectangleRec(rect(cx, cy, sim.grid_cell, sim.grid_cell), withAlpha(rgb(135, 92, 38), wa));
+            }
+        }
+    }
     // Subtle coordinate grid so movement & travel across the frontier feel tangible.
     const grid_col = withAlpha(rgb(255, 255, 255), 8);
     var gx = b.x + 200;
@@ -395,10 +414,13 @@ fn drawWorld(app: *App) void {
         rl.DrawLineEx(.{ .x = b.x, .y = gy }, .{ .x = b.x + b.w, .y = gy }, 1 / zoom, grid_col);
     }
     if (app.show_territories) {
-        for (sim.societies, 0..) |s, si| {
-            const t = w.territories[si];
-            const col = societyColor(s);
+        for (0..w.clade_count) |si| {
+            const cl = w.clades[si];
             const alive = w.stats[si].status != .extinct;
+            // Hide extinct minor diverged clades so the frontier stays uncluttered.
+            if (!alive and si >= sim.society_count) continue;
+            const t = w.territories[si];
+            const col = cladeColor(cl);
             const ccol = withAlpha(col, if (alive) 70 else 25);
             const thick = 1.2 / @max(zoom, 0.45);
             const arm: f32 = 26;
@@ -415,8 +437,8 @@ fn drawWorld(app: *App) void {
             rl.DrawLineEx(.{ .x = x0, .y = y1 }, .{ .x = x0, .y = y1 - arm }, thick, ccol);
             rl.DrawLineEx(.{ .x = x1, .y = y1 }, .{ .x = x1 - arm, .y = y1 }, thick, ccol);
             rl.DrawLineEx(.{ .x = x1, .y = y1 }, .{ .x = x1, .y = y1 - arm }, thick, ccol);
-            text(x0 + 8, y0 + 6, 17, withAlpha(col, if (alive) 105 else 40), "{s}", .{s.name});
-            text(x0 + 8, y0 + 25, 11, withAlpha(rgb(190, 195, 210), if (alive) 65 else 25), "{s}", .{s.environment});
+            text(x0 + 8, y0 + 6, 17, withAlpha(col, if (alive) 105 else 40), "{s}", .{cl.name()});
+            text(x0 + 8, y0 + 25, 11, withAlpha(rgb(190, 195, 210), if (alive) 65 else 25), "{s}", .{cl.environment()});
         }
     }
 
@@ -430,7 +452,7 @@ fn drawWorld(app: *App) void {
     // Persistent stigmergic structures (Shelters & Food Caches) drawn beneath creatures.
     for (w.structures.items) |st| {
         if (st.integrity <= 0) continue;
-        const sc = societyColor(sim.societies[st.society]);
+        const sc = cladeColor(w.clades[@min(st.society, w.clade_count - 1)]);
         const c = v2(st.pos);
         const r = st.radius();
         const done = st.complete();
@@ -527,14 +549,14 @@ fn drawWorld(app: *App) void {
         } else if (e.resting) {
             rl.DrawCircleLinesV(v2(e.pos), e.radius() + 3.5, withAlpha(rgb(175, 200, 235), 90));
         }
-        drawEntity(e, zoom, selected == e);
+        drawEntity(w, e, zoom, selected == e);
     }
 
     for (w.contacts[0..w.contact_count]) |ev| {
         const t = std.math.clamp(ev.age / sim.contact_duration, 0, 1);
         const alpha: u8 = @intFromFloat((1 - t) * 210);
         const col: rl.Color = switch (ev.kind) {
-            .kin_greet => societyColor(sim.societies[ev.society]),
+            .kin_greet => cladeColor(w.clades[@min(ev.society, w.clade_count - 1)]),
             .share_food => rgb(110, 245, 160),
             .rival_clash => rgb(255, 85, 65),
             .startle => rgb(255, 225, 90),
@@ -619,19 +641,26 @@ fn drawWorld(app: *App) void {
     }
 }
 
-fn drawEntity(e: *const sim.Entity, zoom: f32, selected: bool) void {
-    const s = sim.societies[e.society];
+fn drawEntity(w: *const World, e: *const sim.Entity, zoom: f32, selected: bool) void {
+    const cl = w.clades[@min(e.society, w.clade_count - 1)];
     const size = e.radius();
     const health = std.math.clamp(e.energy / 100, 0.25, 1);
-    var col = societyColor(s);
-    col.r = @intFromFloat(@as(f32, @floatFromInt(col.r)) * health);
-    col.g = @intFromFloat(@as(f32, @floatFromInt(col.g)) * health);
-    col.b = @intFromFloat(@as(f32, @floatFromInt(col.b)) * health);
+    const base = cladeColor(cl);
+    // Subtle 18% evolved diet-niche tint (meat=red, plant=emerald, mineral=sky) keeps clades legible while reflecting diet evolution.
+    const diet_r = e.genome.digest[0] * 255 + e.genome.digest[1] * 78 + e.genome.digest[2] * 149;
+    const diet_g = e.genome.digest[0] * 107 + e.genome.digest[1] * 205 + e.genome.digest[2] * 200;
+    const diet_b = e.genome.digest[0] * 107 + e.genome.digest[1] * 160 + e.genome.digest[2] * 240;
+    const col = rl.Color{
+        .r = @intFromFloat(std.math.clamp((@as(f32, @floatFromInt(base.r)) * 0.82 + diet_r * 0.18) * health, 0, 255)),
+        .g = @intFromFloat(std.math.clamp((@as(f32, @floatFromInt(base.g)) * 0.82 + diet_g * 0.18) * health, 0, 255)),
+        .b = @intFromFloat(std.math.clamp((@as(f32, @floatFromInt(base.b)) * 0.82 + diet_b * 0.18) * health, 0, 255)),
+        .a = 255,
+    };
     const deg = e.heading * 180 / std.math.pi;
     const c = v2(e.pos);
     const outline: rl.Color = if (selected) rgb(255, 230, 80) else if (e.hybrid) rgb(255, 220, 60) else if (e.action == .fight) rgb(255, 60, 60) else rgb(0, 0, 0);
     const thick = (if (selected or e.hybrid) @as(f32, 2) else 1) / @max(zoom, 0.5);
-    switch (s.shape) {
+    switch (cl.shape) {
         .triangle => {
             rl.DrawPoly(c, 3, size * 1.2, deg, col);
             rl.DrawPolyLinesEx(c, 3, size * 1.2, deg, thick, outline);
@@ -644,6 +673,18 @@ fn drawEntity(e: *const sim.Entity, zoom: f32, selected: bool) void {
         .square => {
             rl.DrawPoly(c, 4, size * 1.25, deg + 45, col);
             rl.DrawPolyLinesEx(c, 4, size * 1.25, deg + 45, thick, outline);
+        },
+        .diamond => {
+            rl.DrawPoly(c, 4, size * 1.25, deg, col);
+            rl.DrawPolyLinesEx(c, 4, size * 1.25, deg, thick, outline);
+        },
+        .pentagon => {
+            rl.DrawPoly(c, 5, size * 1.15, deg, col);
+            rl.DrawPolyLinesEx(c, 5, size * 1.15, deg, thick, outline);
+        },
+        .hexagon => {
+            rl.DrawPoly(c, 6, size * 1.12, deg, col);
+            rl.DrawPolyLinesEx(c, 6, size * 1.12, deg, thick, outline);
         },
     }
     if (e.stage() == .infant) {
@@ -684,16 +725,17 @@ fn paintField(app: *App) void {
         var b: f32 = 0;
         switch (app.overlay) {
             .trails => {
-                for (sim.societies, 0..) |s, si| {
-                    const t = @min(1, f.data[sim.trailChannel(si)][i] * 0.6);
-                    r += t * @as(f32, @floatFromInt(s.color[0]));
-                    g += t * @as(f32, @floatFromInt(s.color[1]));
-                    b += t * @as(f32, @floatFromInt(s.color[2]));
-                    const a = @min(1, f.data[sim.alarmChannel(si)][i] * 0.5);
-                    r += a * 255;
-                    g += a * 140;
-                    b += a * 40;
-                }
+                // Wyatt (2010) 3-channel RGB chemical signature basis + 1 shared alarm channel.
+                const t0 = @min(1, f.data[sim.trailChannel(0)][i] * 0.6);
+                const t1 = @min(1, f.data[sim.trailChannel(1)][i] * 0.6);
+                const t2 = @min(1, f.data[sim.trailChannel(2)][i] * 0.6);
+                r += t0 * 255 + t1 * 90 + t2 * 90;
+                g += t0 * 90 + t1 * 140 + t2 * 230;
+                b += t0 * 80 + t1 * 255 + t2 * 120;
+                const a = @min(1, f.data[sim.alarmChannel(0)][i] * 0.55);
+                r += a * 255;
+                g += a * 140;
+                b += a * 40;
             },
             .scent => {
                 for (0..sim.food_type_count) |t| {
@@ -727,11 +769,15 @@ fn drawHud(app: *App) !void {
     const mins: u32 = @intFromFloat(w.time / 60);
     const secs: u32 = @intFromFloat(@mod(w.time, 60));
     var total: u32 = 0;
-    for (0..sim.society_count) |s| total += w.population(s);
+    for (0..w.clade_count) |s| total += w.population(s);
     text(24, 20, 22, rgb(235, 235, 245), "{d}:{d:0>2}", .{ mins, secs });
     text(100, 25, 13, rgb(170, 175, 190), "{s} x{d}", .{ if (app.paused) "PAUSED" else "running", speeds[app.speed] });
     drawPhaseBadge(210, 24, w.phase, sim.phaseRemaining(w.phaseClock()));
-    text(24, 50, 14, rgb(200, 200, 215), "Population {d}   Max generation {d}", .{ total, w.max_generation });
+    if (w.clade_count > sim.society_count) {
+        text(24, 50, 14, rgb(200, 200, 215), "Pop {d}  Clades {d}/{d}  Gen {d}", .{ total, w.activeCladeCount(), w.clade_count, w.max_generation });
+    } else {
+        text(24, 50, 14, rgb(200, 200, 215), "Population {d}   Max generation {d}", .{ total, w.max_generation });
+    }
     text(24, 70, 13, rgb(200, 200, 215), "Food: {s}   Overlay: {s}", .{ @tagName(w.scarcity), @tagName(app.overlay) });
     if (w.pure_neural) {
         rl.DrawRectangleRounded(rect(210, 69, 92, 16), 0.4, 4, rgb(52, 38, 88));
@@ -744,11 +790,36 @@ fn drawHud(app: *App) !void {
     // Top-center civilization alert / updates bar (click or press G for full log & generations).
     drawAlertBar(app, sw);
 
-    // Society panel + history chart.
+    // Society panel + history chart (shows top 3 active clades dynamically when > 3 clades exist!).
     const px = sw - 312;
-    panel(px, 12, 300, 300);
+    const extra_clades = w.clade_count > 3;
+    panel(px, 12, 300, if (extra_clades) 316 else 300);
     var y: f32 = 22;
-    for (sim.societies, 0..) |s, si| {
+    if (extra_clades) {
+        text(px + 12, y - 4, 10, rgb(115, 225, 210), "Top 3 of {d} active clades ({d} total - G for all)", .{ w.activeCladeCount(), w.clade_count });
+        y += 14;
+    }
+    var order: [sim.max_societies]usize = undefined;
+    var pops: [sim.max_societies]u32 = undefined;
+    for (0..w.clade_count) |si| {
+        order[si] = si;
+        pops[si] = w.population(si);
+    }
+    if (extra_clades) {
+        // Rank by live population descending (with tie-break favoring founders).
+        for (0..w.clade_count) |a| {
+            var best = a;
+            for (a + 1..w.clade_count) |b| {
+                if (pops[order[b]] > pops[order[best]]) best = b;
+            }
+            const tmp = order[a];
+            order[a] = order[best];
+            order[best] = tmp;
+        }
+    }
+    const show_n = @min(w.clade_count, 3);
+    for (order[0..show_n]) |si| {
+        const cl = w.clades[si];
         var energy: f32 = 0;
         var genr: f32 = 0;
         var hybrids: u32 = 0;
@@ -764,7 +835,7 @@ fn drawHud(app: *App) !void {
         }
         const d = @max(n, 1);
         const st = w.stats[si];
-        text(px + 12, y, 18, societyColor(s), "{s}", .{s.name});
+        text(px + 12, y, 18, cladeColor(cl), "{s}", .{cl.name()});
         drawStatusBadge(px + 102, y + 3, st.status);
         text(px + 194, y + 3, 13, rgb(220, 220, 230), "pop {d:.0}  hyb {d}", .{ n, hybrids });
         text(px + 12, y + 22, 12, rgb(170, 175, 190), "births {d}  starved {d}  old {d}  killed {d}", .{ st.births, st.deaths[0], st.deaths[1], st.deaths[2] });
@@ -853,19 +924,19 @@ fn drawAlertBar(app: *App, sw: f32) void {
     const r = rect(bx, 12, bw, 32);
     panel(r.x, r.y, r.width, r.height);
 
-    // Highlight border if any society is endangered or extinct.
+    // Highlight border if any founder or persistent society is endangered or extinct.
     var urgent = false;
-    for (w.stats) |st| {
-        if (st.status == .endangered or st.status == .extinct) urgent = true;
+    for (w.stats[0..w.clade_count], 0..) |st, si| {
+        if ((si < sim.society_count or st.peak_pop >= 4) and (st.status == .endangered or st.status == .extinct)) urgent = true;
     }
     if (urgent) rl.DrawRectangleRoundedLinesEx(r, 0.04, 6, 1.5, withAlpha(rgb(255, 110, 90), 170));
 
     if (w.event_count > 0) {
         const ev = w.events[w.event_count - 1];
-        const col = eventColor(ev);
+        const col = eventColor(w, ev);
         rl.DrawCircleV(.{ .x = bx + 16, .y = 28 }, 4.5, col);
         var buf: [128]u8 = undefined;
-        const msg = formatEvent(&buf, ev);
+        const msg = formatEvent(w, &buf, ev);
         text(bx + 28, 20, 12, rgb(225, 230, 240), "{s}", .{msg});
     } else {
         rl.DrawCircleV(.{ .x = bx + 16, .y = 28 }, 4.5, rgb(110, 210, 140));
@@ -948,12 +1019,12 @@ fn drawToasts(app: *const App, sw: f32) void {
         const bg_a: u8 = @intFromFloat(fade * 225);
         const fg_a: u8 = @intFromFloat(fade * 255);
         const r = rect(tx, ty, tw, 28);
-        const col = eventColor(t.ev);
+        const col = eventColor(&app.world, t.ev);
         rl.DrawRectangleRounded(r, 0.2, 6, .{ .r = 20, .g = 24, .b = 36, .a = bg_a });
         rl.DrawRectangleRoundedLinesEx(r, 0.2, 6, 1.2, withAlpha(col, @intFromFloat(fade * 170)));
         rl.DrawCircleV(.{ .x = tx + 14, .y = ty + 14 }, 4.2, withAlpha(col, fg_a));
         var buf: [128]u8 = undefined;
-        const msg = formatEvent(&buf, t.ev);
+        const msg = formatEvent(&app.world, &buf, t.ev);
         text(tx + 26, ty + 7, 12, withAlpha(rgb(235, 238, 248), fg_a), "{s}", .{msg});
         ty += 34;
     }
@@ -1035,7 +1106,7 @@ fn drawLabPanel(app: *App, sw: f32) !void {
         if (is_active or is_cmp) {
             rl.DrawRectangleRoundedLinesEx(r, 0.35, 4, 1.2, if (is_active) rgb(140, 185, 255) else rgb(110, 230, 175));
         }
-        text(r.x + 6, r.y + 3, 10, societyColor(sim.societies[sp.society]), "#{d} G{d}", .{ sp.id, sp.generation });
+        text(r.x + 6, r.y + 3, 10, cladeColor(app.world.clades[@min(sp.society, app.world.clade_count - 1)]), "#{d} G{d}", .{ sp.id, sp.generation });
         if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_LEFT)) app.lab_active = idx;
         if (hover and rl.IsMouseButtonPressed(rl.MOUSE_BUTTON_RIGHT)) {
             app.lab_compare = if (is_cmp) null else idx;
@@ -1045,8 +1116,8 @@ fn drawLabPanel(app: *App, sw: f32) !void {
     y = gy + 28;
 
     const a = &app.specimens[app.lab_active];
-    const s = sim.societies[a.society];
-    text(px + 14, y, 16, societyColor(s), "{s} #{d}  (Gen {d}, {s})", .{ s.name, a.id, a.generation, @tagName(a.role) });
+    const cl = app.world.clades[@min(a.society, app.world.clade_count - 1)];
+    text(px + 14, y, 16, cladeColor(cl), "{s} #{d}  (Gen {d}, {s})", .{ cl.name(), a.id, a.generation, @tagName(a.role) });
     text(px + 14, y + 20, 11, rgb(175, 180, 195), "lineage #{d}  kids {d}  kills {d}  food {d:.0}  travel {d:.0}u  brain {d}n/{d}s", .{
         a.lineage, a.children, a.kills, a.food_eaten, a.distance_traveled, a.cog.totalNeurons(), a.cog.activeSynapses(),
     });
@@ -1273,8 +1344,8 @@ fn drawExpPanel(app: *App, sw: f32) !void {
 
     // 3. Population & Batch Release Spawner
     var total_pop: u32 = 0;
-    for (0..sim.society_count) |si| total_pop += w.population(si);
-    text(px + 14, y, 12, rgb(225, 228, 240), "Population release  ({d} alive, uncapped)", .{total_pop});
+    for (0..w.clade_count) |si| total_pop += w.population(si);
+    text(px + 14, y, 12, rgb(225, 228, 240), "Population release  ({d} alive across {d}/{d} clades)", .{ total_pop, w.activeCladeCount(), w.clade_count });
     y += 18;
     text(px + 14, y + 3, 11, rgb(180, 185, 200), "Release amount:", .{});
     var bx = px + 124;
@@ -1302,12 +1373,12 @@ fn drawExpPanel(app: *App, sw: f32) !void {
         _ = try w.spawnRandomBatch(2, rqty);
     }
     if (smallBtn(rect(px + 382, y, 128, 24), try std.fmt.bufPrint(&s3, "+All (+{d} each)", .{rqty}), rgb(54, 60, 84))) {
-        for (0..sim.society_count) |si| _ = try w.spawnRandomBatch(@intCast(si), rqty);
+        for (0..w.clade_count) |si| _ = try w.spawnRandomBatch(@intCast(si), rqty);
     }
     y += 34;
 
     // 4. Knowledge, Tools, Wild Prey & Apex Predators
-    text(px + 14, y, 12, rgb(225, 228, 240), "Tools, wildlife & predators", .{});
+    text(px + 14, y, 12, rgb(225, 228, 240), "Tools, wildlife, speciation & brain mode", .{});
     y += 18;
     if (smallBtn(rect(px + 14, y, 134, 24), "Spawn Prey (+3)", rgb(104, 72, 34))) {
         try w.spawnPrey(3);
@@ -1323,6 +1394,9 @@ fn drawExpPanel(app: *App, sw: f32) !void {
     const mode_col = if (w.pure_neural) rgb(72, 46, 114) else rgb(44, 56, 82);
     if (smallBtn(rect(px + 14, y, 252, 24), mode_label, mode_col)) {
         w.pure_neural = !w.pure_neural;
+    }
+    if (smallBtn(rect(px + 274, y, 234, 24), "Seed New Tribe (+10, dynamic clade)", rgb(32, 92, 86))) {
+        _ = try w.spawnNewClade(10);
     }
     y += 30;
     text(px + 14, y, 10, rgb(140, 148, 165), "Pure Neural removes all steerTo autopilots: movement & calls come 100% from FlyWire + evolved recurrent cortex.", .{});
@@ -1359,19 +1433,34 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
         const show = @min(w.event_count, 5);
         for (0..show) |k| {
             const ev = w.events[w.event_count - 1 - k];
-            rl.DrawCircleV(.{ .x = px + 20, .y = y + 6 }, 3.8, eventColor(ev));
+            rl.DrawCircleV(.{ .x = px + 20, .y = y + 6 }, 3.8, eventColor(w, ev));
             var buf: [128]u8 = undefined;
-            const msg = formatEvent(&buf, ev);
+            const msg = formatEvent(w, &buf, ev);
             text(px + 30, y, 11, rgb(200, 205, 220), "{s}", .{msg});
             y += 16;
         }
     }
 
     y += 8;
-    // 2. Emergent Society Roles
-    text(px + 14, y, 12, rgb(210, 215, 230), "Emergent roles (from learned skills)", .{});
+    // 2. Emergent Society Roles (top 3 active clades)
+    text(px + 14, y, 12, rgb(210, 215, 230), "Emergent roles ({d} active / {d} clades)", .{ w.activeCladeCount(), w.clade_count });
     y += 18;
-    for (sim.societies, 0..) |s, si| {
+    var g_order: [sim.max_societies]usize = undefined;
+    for (0..w.clade_count) |si| g_order[si] = si;
+    if (w.clade_count > 3) {
+        for (0..w.clade_count) |a| {
+            var best = a;
+            for (a + 1..w.clade_count) |b| {
+                if (w.population(g_order[b]) > w.population(g_order[best])) best = b;
+            }
+            const tmp = g_order[a];
+            g_order[a] = g_order[best];
+            g_order[best] = tmp;
+        }
+    }
+    const show_clades = @min(w.clade_count, 3);
+    for (g_order[0..show_clades]) |si| {
+        const cl = w.clades[si];
         var counts: [sim.role_count]u32 = @splat(0);
         var avg_sk: [sim.skill_count]f32 = @splat(0);
         var n: f32 = 0;
@@ -1382,7 +1471,7 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
             for (&avg_sk, e.skills) |*a, v| a.* += v;
         }
         const d = @max(n, 1);
-        text(px + 14, y, 12, societyColor(s), "{s}", .{s.name});
+        text(px + 14, y, 12, cladeColor(cl), "{s}", .{cl.name()});
         text(px + 92, y, 11, rgb(185, 190, 205), "for {d}  sct {d}  grd {d}  car {d}  bld {d}  hnt {d}  eld {d}", .{
             counts[@backingInt(sim.Role.forager)],
             counts[@backingInt(sim.Role.scout)],
@@ -1429,11 +1518,12 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
     y += 6;
     text(px + 14, y, 11, rgb(205, 215, 235), "Emergent dialects (divergence {d:.2})", .{w.dialectDivergence()});
     y += 16;
-    for (sim.societies, 0..) |s, si| {
+    for (g_order[0..show_clades], 0..) |si, col_i| {
+        const cl = w.clades[si];
         const st = w.stats[si];
-        const dx = px + 14 + @as(f32, @floatFromInt(si)) * 146;
+        const dx = px + 14 + @as(f32, @floatFromInt(col_i)) * 146;
         rl.DrawCircleV(.{ .x = dx + 6, .y = y + 5 }, 4.5, vocalColor(st.vocal_mean));
-        text(dx + 15, y, 10, societyColor(s), "{s}", .{s.name});
+        text(dx + 15, y, 10, cladeColor(cl), "{s}", .{cl.name()});
         text(dx + 72, y, 10, rgb(165, 175, 195), "sep {d:.2}", .{st.vocalContextSep()});
     }
 }
@@ -1450,10 +1540,10 @@ fn drawPhaseBadge(x: f32, y: f32, p: sim.WorldPhase, rem: f32) void {
     text(x + 7, y + 3, 10, fg, "{s} {d}:{d:0>2}", .{ label, rmins, rsecs });
 }
 
-fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
+fn formatEvent(w: *const World, buf: []u8, ev: sim.WorldEvent) []const u8 {
     const mins: u32 = @intFromFloat(ev.time / 60);
     const secs: u32 = @intFromFloat(@mod(ev.time, 60));
-    const name = sim.societies[ev.society].name;
+    const name = w.clades[@min(ev.society, w.clade_count - 1)].name();
     return switch (ev.kind) {
         .endangered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} endangered ({d} left)", .{ mins, secs, name, ev.value }),
         .critical => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} near extinction ({d} left!)", .{ mins, secs, name, ev.value }),
@@ -1463,25 +1553,27 @@ fn formatEvent(buf: []u8, ev: sim.WorldEvent) []const u8 {
         .milestone_gen => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} reached Generation {d}", .{ mins, secs, name, ev.value }),
         .first_hybrid => std.fmt.bufPrint(buf, "{d}:{d:0>2}  First {s} hybrid born (Gen {d})", .{ mins, secs, name, ev.value }),
         .hybrid_majority => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Hybrids now lead {s} ({d} pop)", .{ mins, secs, name, ev.value }),
-        .territory_clash => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} & {s} contesting territory!", .{ mins, secs, name, sim.societies[@min(ev.value, sim.society_count - 1)].name }),
+        .territory_clash => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} & {s} contesting territory!", .{ mins, secs, name, w.clades[@min(ev.value, w.clade_count - 1)].name() }),
         .cannibalism => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Cannibalism emerged in {s} ({d} kills)!", .{ mins, secs, name, ev.value }),
         .tool_discovered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} discovered tool-making!", .{ mins, secs, name }),
         .building_discovered => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} built their first {s}!", .{ mins, secs, name, if (ev.value == 0) "shelter" else "food cache" }),
         .predator_slain => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} slew an Apex Predator ({d} total)!", .{ mins, secs, name, ev.value }),
-        .cache_raided => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} raided a {s} food cache!", .{ mins, secs, sim.societies[@min(ev.value, sim.society_count - 1)].name, name }),
+        .cache_raided => std.fmt.bufPrint(buf, "{d}:{d:0>2}  {s} raided a {s} food cache!", .{ mins, secs, w.clades[@min(ev.value, w.clade_count - 1)].name(), name }),
+        .species_diverged => std.fmt.bufPrint(buf, "{d}:{d:0>2}  New species diverged: {s} (Gen {d})!", .{ mins, secs, name, ev.value }),
         .world_bloom => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Wild bloom - abundant food growth", .{ mins, secs }),
         .world_storm => std.fmt.bufPrint(buf, "{d}:{d:0>2}  Harsh storm sweeping the frontier", .{ mins, secs }),
     } catch "";
 }
 
-fn eventColor(ev: sim.WorldEvent) rl.Color {
+fn eventColor(w: *const World, ev: sim.WorldEvent) rl.Color {
     return switch (ev.kind) {
         .endangered, .territory_clash, .cache_raided => rgb(250, 185, 70),
         .critical, .extinct => rgb(255, 85, 75),
         .cannibalism => rgb(255, 75, 125),
         .tool_discovered, .building_discovered, .predator_slain => rgb(110, 230, 235),
+        .species_diverged => rgb(90, 245, 220),
         .recovered, .boom, .world_bloom => rgb(100, 235, 145),
-        .milestone_gen => societyColor(sim.societies[ev.society]),
+        .milestone_gen => cladeColor(w.clades[@min(ev.society, w.clade_count - 1)]),
         .first_hybrid, .hybrid_majority => rgb(255, 220, 70),
         .world_storm => rgb(175, 155, 255),
     };
@@ -1518,6 +1610,10 @@ fn drawKey(app: *App, x: f32, top: f32) void {
             .square => {
                 rl.DrawPoly(c, 4, 7.5, 45, col);
                 rl.DrawPolyLinesEx(c, 4, 7.5, 45, 1, rgb(0, 0, 0));
+            },
+            .diamond, .pentagon, .hexagon => {
+                rl.DrawPoly(c, 6, 7.0, 0, col);
+                rl.DrawPolyLinesEx(c, 6, 7.0, 0, 1, rgb(0, 0, 0));
             },
         }
         text(x + 36, y, 12, col, "{s}", .{s.name});
@@ -1615,19 +1711,21 @@ fn drawHistory(w: *const World, x: f32, y: f32, width: f32, height: f32) void {
     rl.DrawRectangleRec(rect(x, y, width, height), rgb(20, 22, 32));
     if (w.history_count < 2) return;
     var peak: f32 = 10;
-    for (w.history[0..w.history_count]) |row| for (row) |v| {
+    for (w.history[0..w.history_count]) |row| for (row[0..w.clade_count]) |v| {
         peak = @max(peak, @as(f32, @floatFromInt(v)));
     };
     const step = width / @as(f32, @floatFromInt(w.history_count - 1));
-    for (sim.societies, 0..) |s, si| {
+    for (0..w.clade_count) |si| {
+        const col = cladeColor(w.clades[si]);
         for (1..w.history_count) |i| {
             const a = w.history[i - 1][si];
             const b = w.history[i][si];
+            if (a == 0 and b == 0 and si >= sim.society_count) continue;
             rl.DrawLineEx(
                 .{ .x = x + step * @as(f32, @floatFromInt(i - 1)), .y = y + height - height * @as(f32, @floatFromInt(a)) / peak },
                 .{ .x = x + step * @as(f32, @floatFromInt(i)), .y = y + height - height * @as(f32, @floatFromInt(b)) / peak },
                 1.5,
-                societyColor(s),
+                col,
             );
         }
     }
@@ -1635,19 +1733,19 @@ fn drawHistory(w: *const World, x: f32, y: f32, width: f32, height: f32) void {
 }
 
 fn drawInspector(app: *App, e: *const sim.Entity) !void {
-    const s = sim.societies[e.society];
+    const cl = app.world.clades[@min(e.society, app.world.clade_count - 1)];
     const sh: f32 = @floatFromInt(rl.GetScreenHeight());
     const x: f32 = 12;
     const top_y: f32 = 114;
     const max_h = @max(@as(f32, 460), sh - 74 - top_y);
-    const want_h: f32 = if (app.show_brain) 666 else 504;
+    const want_h: f32 = if (app.show_brain) 680 else 518;
     const h = @min(want_h, max_h);
     var y = top_y;
     panel(x, y, 300, h);
     y += 7;
     var id_buf: [32]u8 = undefined;
-    const id_str = try std.fmt.bufPrint(&id_buf, "{s} #{d}", .{ s.name, e.id });
-    text(x + 12, y, 16, societyColor(s), "{s}", .{id_str});
+    const id_str = try std.fmt.bufPrint(&id_buf, "{s} #{d}", .{ cl.name(), e.id });
+    text(x + 12, y, 16, cladeColor(cl), "{s}", .{id_str});
     const role_tag = @tagName(e.role());
     const stage_tag = @tagName(e.stage());
     const role_x = x + 18 + @as(f32, @floatFromInt(id_str.len)) * 8.2;
@@ -1691,7 +1789,11 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
     text(x + 12, y, 11, rgb(190, 195, 210), "parents #{d} & #{d}   action: {s}{s}", .{ e.parents[0], e.parents[1], @tagName(e.action), suffix });
     y += 14;
     text(x + 12, y, 11, rgb(175, 210, 220), "gear: {s} ({d:.0}%)   carrying: {s}", .{ @tagName(e.tool), e.tool_durability, @tagName(e.carrying) });
-    y += 15;
+    y += 14;
+    text(x + 12, y, 10, rgb(170, 200, 185), "diet M/P/X {d:.0}/{d:.0}/{d:.0}%   size x{d:.2} ({s})", .{
+        e.genome.digest[0] * 100, e.genome.digest[1] * 100, e.genome.digest[2] * 100, e.genome.body_scale, @tagName(cl.shape),
+    });
+    y += 14;
     bar(x + 12, y, "energy", e.energy / sim.max_energy, energyColor(e.energy));
     y += 16;
 
@@ -1853,6 +1955,10 @@ fn v2(p: sim.Vec2) rl.Vector2 {
 
 fn societyColor(s: sim.Society) rl.Color {
     return rgb(s.color[0], s.color[1], s.color[2]);
+}
+
+fn cladeColor(c: sim.Clade) rl.Color {
+    return rgb(c.color[0], c.color[1], c.color[2]);
 }
 
 /// Map a 3-channel arbitrary vocal token in [-1, +1]^3 to a vivid RGB acoustic color.

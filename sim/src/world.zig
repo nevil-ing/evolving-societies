@@ -35,7 +35,56 @@ pub const Rect = struct {
 pub const FoodType = enum(u8) { meat, plant, mineral, universal };
 pub const food_type_count = 4;
 
-pub const Shape = enum { triangle, circle, square };
+pub const Shape = enum(u8) {
+    triangle,
+    circle,
+    square,
+    diamond,
+    pentagon,
+    hexagon,
+
+    /// Honest physical morphology trade-offs (signaling theory): shape geometry is an unfakeable ecological niche!
+    pub fn speedMult(s: Shape) f32 {
+        return switch (s) {
+            .triangle => 1.12,
+            .diamond => 1.09,
+            .circle => 1.02,
+            .pentagon => 0.96,
+            .square => 0.94,
+            .hexagon => 0.92,
+        };
+    }
+    pub fn turnMult(s: Shape) f32 {
+        return switch (s) {
+            .circle => 1.14,
+            .triangle => 1.06,
+            .diamond => 1.04,
+            .pentagon => 0.96,
+            .square => 0.94,
+            .hexagon => 0.92,
+        };
+    }
+    pub fn energyCapMult(s: Shape) f32 {
+        return switch (s) {
+            .hexagon => 1.16,
+            .square => 1.12,
+            .pentagon => 1.10,
+            .circle => 1.02,
+            .diamond => 0.94,
+            .triangle => 0.90,
+        };
+    }
+    pub fn insulationMult(s: Shape) f32 {
+        return switch (s) {
+            .hexagon => 0.84,
+            .square => 0.88,
+            .pentagon => 0.90,
+            .circle => 0.98,
+            .diamond => 1.06,
+            .triangle => 1.10,
+        };
+    }
+};
 
 pub const Society = struct {
     name: [:0]const u8,
@@ -52,21 +101,53 @@ pub const societies = [_]Society{
     .{ .name = "Circles", .shape = .circle, .color = .{ 90, 140, 255 }, .territory = .{ .x = 150, .y = -450, .w = 500, .h = 400 }, .food = .plant, .harshness = 0.1, .environment = "Lush Gardens" },
     .{ .name = "Squares", .shape = .square, .color = .{ 90, 230, 120 }, .territory = .{ .x = -250, .y = 100, .w = 500, .h = 400 }, .food = .mineral, .harshness = 0.3, .environment = "Crystal Caverns" },
 };
-pub const society_count = societies.len;
+pub const society_count = societies.len; // initial founder count (3)
+pub const max_societies = 16; // dynamic unlimited speciation up to 16 concurrent clades/societies!
+
+pub const Clade = struct {
+    name_buf: [24]u8 = @splat(0),
+    name_len: u8 = 0,
+    env_buf: [24]u8 = @splat(0),
+    env_len: u8 = 0,
+    shape: Shape = .triangle,
+    color: [3]u8 = .{ 200, 200, 200 },
+    centroid_tag: [4]f32 = .{ 0.5, 0.5, 0.5, 0.5 },
+    centroid_digest: [3]f32 = .{ 0.34, 0.33, 0.33 },
+    parent_clade: ?u8 = null,
+    founded_at: f32 = 0,
+    harshness: f32 = 0.25,
+
+    pub fn name(c: *const Clade) []const u8 {
+        return c.name_buf[0..c.name_len];
+    }
+    pub fn environment(c: *const Clade) []const u8 {
+        return c.env_buf[0..c.env_len];
+    }
+    pub fn preferredFood(c: *const Clade) FoodType {
+        if (c.centroid_digest[0] >= c.centroid_digest[1] and c.centroid_digest[0] >= c.centroid_digest[2]) return .meat;
+        if (c.centroid_digest[1] >= c.centroid_digest[2]) return .plant;
+        return .mineral;
+    }
+};
 
 pub const bounds = Rect{ .x = -1000, .y = -800, .w = 2000, .h = 1600 };
 
-// Pheromone channel layout.
+// Wyatt (2010) 4-channel O(1) chemical signature mixture layout:
+//   0..3 : food scents (meat, plant, mineral, universal)
+//   4..6 : 3 shared trail basis channels (creatures deposit & dot-product with heritable unit chem_sig[3])
+//   7    : 1 shared alarm channel
+// Supports INFINITE clades in constant O(1) memory & 2x faster diffusion!
+pub const trail_basis_count = 3;
 pub fn scentChannel(t: FoodType) usize {
     return @backingInt(t);
 }
-pub fn trailChannel(s: usize) usize {
-    return food_type_count + s;
+pub fn trailChannel(basis: usize) usize {
+    return food_type_count + (basis % trail_basis_count);
 }
-pub fn alarmChannel(s: usize) usize {
-    return food_type_count + society_count + s;
+pub fn alarmChannel(_: usize) usize {
+    return food_type_count + trail_basis_count;
 }
-pub const channel_count = food_type_count + 2 * society_count;
+pub const channel_count = food_type_count + trail_basis_count + 1;
 
 pub const Scarcity = enum {
     feast,
@@ -175,6 +256,7 @@ pub const Prey = struct {
     heading: f32,
     hp: f32 = 90,
     max_hp: f32 = 90,
+    energy: f32 = 80, // grazed from real plants in the trophic food web; reproduces when > 130
     flee_timer: f32 = 0,
     stagger_timer: f32 = 0,
 
@@ -247,7 +329,7 @@ pub fn phaseRemaining(time: f32) f32 {
     return cycle_length - t;
 }
 
-pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, predator_slain, cache_raided, world_bloom, world_storm };
+pub const EventKind = enum(u8) { endangered, critical, extinct, recovered, boom, milestone_gen, first_hybrid, hybrid_majority, territory_clash, cannibalism, tool_discovered, building_discovered, predator_slain, cache_raided, world_bloom, world_storm, species_diverged };
 
 pub const WorldEvent = struct {
     time: f32,
@@ -374,6 +456,8 @@ pub const Entity = struct {
     ally_dist: f32 = 0,
     allies_near: u32 = 0,
     mate: ?u32 = null,
+    nearest_kin_sim: f32 = 0, // genetic + dialect + trust kinship of nearest creature
+    nearest_trust: f32 = 0, // SocialBond trust toward nearest creature
 
     dead: ?Death = null,
 
@@ -384,12 +468,13 @@ pub const Entity = struct {
         return .adult;
     }
     pub fn radius(e: *const Entity) f32 {
-        return switch (e.stage()) {
+        const base: f32 = switch (e.stage()) {
             .infant => 8 * (0.46 + 0.16 * std.math.clamp(e.age / infant_age, 0, 1)),
             .juvenile => 8 * (0.62 + 0.36 * std.math.clamp((e.age - infant_age) / (maturity_age - infant_age), 0, 1)),
             .adult => 8.0,
             .elder => 8.5,
         };
+        return base * e.genome.body_scale;
     }
     pub fn mature(e: *const Entity) bool {
         return e.age >= maturity_age;
@@ -514,9 +599,9 @@ pub const max_energy: f32 = 150;
 pub const brain_hz: f32 = 20;
 pub const history_len = 400;
 const sense_range: f32 = 160;
-const grid_cell: f32 = 80;
-const grid_cols: usize = 25; // bounds.w (2000) / 80
-const grid_rows: usize = 20; // bounds.h (1600) / 80
+pub const grid_cell: f32 = 80;
+pub const grid_cols: usize = 25; // bounds.w (2000) / 80
+pub const grid_rows: usize = 20; // bounds.h (1600) / 80
 const grid_cells: usize = grid_cols * grid_rows;
 const adapt_tau: f32 = 1.0;
 const adapt_floor: f32 = 0.02;
@@ -580,15 +665,26 @@ pub const World = struct {
     max_generation: u32 = 1,
     scarcity: Scarcity = .normal,
     brain_accum: f32 = 0,
-    stats: [society_count]SocietyStats = @splat(.{}),
-    history: [history_len][society_count]u16 = undefined,
+    clades: [max_societies]Clade = initClades(),
+    clade_count: usize = society_count,
+    stats: [max_societies]SocietyStats = @splat(.{}),
+    history: [history_len][max_societies]u16 = undefined,
     history_count: usize = 0,
     history_timer: f32 = 0,
     status_timer: f32 = 0,
     clash_cooldown: f32 = 0,
     phase: WorldPhase = .calm,
     phase_offset: f32 = 0,
-    territories: [society_count]Rect = initTerritories(),
+    territories: [max_societies]Rect = initTerritories(),
+    /// Closed-loop biogeochemical Miniverse grids (25x20):
+    ///   soil_nutrients : conserved soil fertility pulled by growing plants, replenished by waste & rotting corpses
+    ///   soil_moisture  : recharged by storm rain & bloom dew, evaporated gently in calm weather
+    ///   waste          : organic metabolic waste from dense crowds; diffuses, causes crowding stress, and decomposes into soil_nutrients
+    soil_nutrients: [grid_cells]f32 = @splat(0.65),
+    soil_moisture: [grid_cells]f32 = @splat(0.65),
+    waste: [grid_cells]f32 = @splat(0.0),
+    waste_scratch: [grid_cells]f32 = @splat(0.0),
+    eco_timer: f32 = 0,
     events: [max_events]WorldEvent = undefined,
     event_count: usize = 0,
     gen_records: [max_gen_records]GenRecord = @splat(.{}),
@@ -610,10 +706,8 @@ pub const World = struct {
     pub fn init(gpa: std.mem.Allocator, circuit: *const fly.Circuit, seed: u64) !World {
         var channels: [channel_count]pher.Channel = undefined;
         for (0..food_type_count) |t| channels[t] = pher.channelFor(.scent);
-        for (0..society_count) |s| {
-            channels[trailChannel(s)] = pher.channelFor(.trail);
-            channels[alarmChannel(s)] = pher.channelFor(.alarm);
-        }
+        for (0..trail_basis_count) |b| channels[trailChannel(b)] = pher.channelFor(.trail);
+        channels[alarmChannel(0)] = pher.channelFor(.alarm);
         var w = World{
             .gpa = gpa,
             .prng = .init(seed),
@@ -644,6 +738,8 @@ pub const World = struct {
         w.next_id = 1;
         w.max_generation = 1;
         w.brain_accum = 0;
+        w.clades = initClades();
+        w.clade_count = society_count;
         w.stats = @splat(.{});
         w.history_count = 0;
         w.history_timer = 0;
@@ -652,6 +748,10 @@ pub const World = struct {
         w.phase = .calm;
         w.phase_offset = 0;
         w.territories = initTerritories();
+        w.soil_nutrients = @splat(0.65);
+        w.soil_moisture = @splat(0.65);
+        w.waste = @splat(0.0);
+        w.eco_timer = 0;
         w.event_count = 0;
         w.gen_records = @splat(.{});
         w.gen_record_count = 0;
@@ -670,6 +770,38 @@ pub const World = struct {
 
     fn populate(w: *World) !void {
         const wild = bounds.inset(150);
+        // Seed living soil nutrients & moisture: lush homelands and fertile wild frontier.
+        w.soil_nutrients = @splat(0.62);
+        w.soil_moisture = @splat(0.70);
+        w.waste = @splat(0.0);
+        for (0..grid_rows) |gy| {
+            for (0..grid_cols) |gx| {
+                const pos = Vec2{
+                    .x = bounds.x + (@as(f32, @floatFromInt(gx)) + 0.5) * grid_cell,
+                    .y = bounds.y + (@as(f32, @floatFromInt(gy)) + 0.5) * grid_cell,
+                };
+                for (societies) |s| {
+                    if (s.territory.contains(pos)) {
+                        w.soil_nutrients[gy * grid_cols + gx] = 0.88;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Seed initial raw stone outcrops & timber first so geological minerals crystallize around real stone.
+        for (societies, 0..) |s, si| {
+            const stone_n: usize = if (si == 1) 2 else 4;
+            const wood_n: usize = 6 - stone_n;
+            for (0..stone_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .stone, .amount = 45 });
+            for (0..wood_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .wood, .amount = 45 });
+        }
+        for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .wood, .amount = 45 });
+        for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .stone, .amount = 45 });
+
+        // Seed initial living ecosystem resources (plants, minerals, fungi/universal, and carrion).
+        // After startup, live mode (!forage_only) sustains food purely via closed-loop photosynthesis,
+        // geological weathering, waste decomposition, prey grazing/reproduction, and corpse recycling.
         for (societies, 0..) |s, si| {
             for (0..3) |_| try w.addPatch(s.food, s.territory.inset(30), @intCast(si));
             try w.addPatch(.universal, s.territory.inset(30), @intCast(si));
@@ -681,14 +813,9 @@ pub const World = struct {
         }
 
         for (societies, 0..) |s, si| {
-            // Raw materials: stone outcrops & timber scattered in and around each homeland.
-            const stone_n: usize = if (si == 1) 2 else 4;
-            const wood_n: usize = 6 - stone_n;
-            for (0..stone_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .stone, .amount = 45 });
-            for (0..wood_n) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(s.territory.inset(25)), .kind = .wood, .amount = 45 });
-
             for (0..25) |k| {
-                const g = try gen.Genome.random(w.gpa, w.rng(), w.circuit.types);
+                const cl = w.clades[si];
+                const g = try gen.Genome.randomForNiche(w.gpa, w.rng(), w.circuit.types, @backingInt(s.food), cl.centroid_tag);
                 const e = try w.addEntity(@intCast(si), w.randomIn(s.territory.inset(40)), g);
                 // Natural starting age pyramid: ~72% young adults, ~28% growing youths.
                 e.age = if (k < 18)
@@ -699,10 +826,8 @@ pub const World = struct {
                 w.recordGeneration(e);
             }
         }
-        // Frontier raw materials & wild prey for exploration, building, and tool-hunting.
-        for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .wood, .amount = 45 });
-        for (0..18) |_| try w.materials.append(w.gpa, .{ .pos = w.randomIn(wild), .kind = .stone, .amount = 45 });
-        try w.spawnPrey(5);
+        // Living wild prey herd (grazes plants, reproduces calves, drops corpses) & apex predator.
+        try w.spawnPrey(10);
         try w.spawnPredators(1);
     }
 
@@ -767,12 +892,18 @@ pub const World = struct {
         lineage: u32,
         hybrid: bool,
     ) !*Entity {
-        const g = gen.Genome{
+        const cl = w.clades[@min(society, w.clade_count - 1)];
+        var g = gen.Genome{
             .traits = traits,
             .motor = motor,
             .cog = cog,
             .fly_gain = try w.gpa.dupe(f32, fly_gain),
+            .digest = cl.centroid_digest,
+            .kin_tag = cl.centroid_tag,
+            .chem_sig = .{ cl.centroid_tag[0], cl.centroid_tag[1], cl.centroid_tag[2] },
+            .body_scale = 1.0,
         };
+        gen.normalizeChem(&g.chem_sig);
         const e = try w.addEntity(society, pos, g);
         e.age = maturity_age + 5;
         e.energy = 110;
@@ -794,11 +925,88 @@ pub const World = struct {
         return null;
     }
 
+    /// Evolvable diet digestion yield: no hardcoded society diet lock!
+    /// Pure specialists extract ~100% on their evolved niche; generalists digest multiple foods at lower yield.
     pub fn canEat(e: *const Entity, food: FoodType) f32 {
-        if (food == .universal or food == societies[e.society].food) return 1.0;
-        const adapt = e.genome.trait(.adaptability);
-        if (e.hybrid or adapt > 0.6) return 0.5;
-        return 0;
+        if (food == .universal) return 1.0;
+        const y = e.genome.digestionYield(@backingInt(food));
+        return if (e.hybrid) @max(y, 0.5) else y;
+    }
+
+    pub fn activeCladeCount(w: *const World) u32 {
+        var n: u32 = 0;
+        for (0..w.clade_count) |si| {
+            if (w.population(si) > 0) n += 1;
+        }
+        return n;
+    }
+
+    /// Continuous kinship similarity in [0, 1] combining genetics, vocal dialect, trust bond, and clade familiarity.
+    pub fn kinSimilarity(a: *const Entity, b: *const Entity) f32 {
+        const gsim = a.genome.geneticSim(&b.genome);
+        const dv0 = a.last_vocal[0] - b.last_vocal[0];
+        const dv1 = a.last_vocal[1] - b.last_vocal[1];
+        const dv2 = a.last_vocal[2] - b.last_vocal[2];
+        const vsim = std.math.clamp(1.0 - @sqrt(dv0 * dv0 + dv1 * dv1 + dv2 * dv2) / 3.46, 0, 1);
+        const tsim = std.math.clamp((a.trustOf(b.id) + 1.0) * 0.5, 0, 1);
+        const fam: f32 = if (a.society == b.society) 0.14 else 0;
+        return std.math.clamp(0.55 * gsim + 0.15 * vsim + 0.20 * tsim + fam, 0, 1);
+    }
+
+    /// Found a new emergent species/clade dynamically (up to max_societies = 16).
+    fn foundClade(w: *World, pos: Vec2, tag: [4]f32, dig: [3]f32, parent: ?u8, generation: u32) ?u8 {
+        if (w.clade_count >= max_societies) return null;
+        const id: u8 = @intCast(w.clade_count);
+        w.clade_count += 1;
+        var c = Clade{
+            .shape = @fromBackingInt(@intCast((id) % @typeInfo(Shape).@"enum".field_names.len)),
+            .color = .{
+                @intFromFloat(std.math.clamp(70 + tag[0] * 175 + dig[0] * 35, 70, 250)),
+                @intFromFloat(std.math.clamp(70 + tag[1] * 175 + dig[1] * 35, 70, 250)),
+                @intFromFloat(std.math.clamp(70 + tag[2] * 175 + dig[2] * 35, 70, 250)),
+            },
+            .centroid_tag = tag,
+            .centroid_digest = dig,
+            .parent_clade = parent,
+            .founded_at = w.time,
+            .harshness = 0.25,
+        };
+        const niche: []const u8 = if (dig[0] >= 0.52)
+            "Meat"
+        else if (dig[1] >= 0.52)
+            "Plant"
+        else if (dig[2] >= 0.52)
+            "Miner"
+        else
+            "Omni";
+        if (std.fmt.bufPrint(&c.name_buf, "Clade {d}", .{id + 1})) |ns| c.name_len = @intCast(ns.len) else |_| {}
+        if (std.fmt.bufPrint(&c.env_buf, "{s} Divergence", .{niche})) |es| c.env_len = @intCast(es.len) else |_| {}
+        w.clades[id] = c;
+        w.stats[id] = .{ .peak_pop = 1, .max_gen = generation };
+        const safe = bounds.inset(40);
+        const tw: f32 = 380;
+        const th: f32 = 320;
+        w.territories[id] = .{
+            .x = std.math.clamp(pos.x - tw * 0.5, safe.x, safe.x + safe.w - tw),
+            .y = std.math.clamp(pos.y - th * 0.5, safe.y, safe.y + safe.h - th),
+            .w = tw,
+            .h = th,
+        };
+        w.pushEvent(id, .species_diverged, generation);
+        return id;
+    }
+
+    /// Seed a brand-new dynamic tribe/species into the frontier (used by Exp E).
+    pub fn spawnNewClade(w: *World, count: usize) !?u8 {
+        const wild = bounds.inset(220);
+        const pos = w.randomIn(wild);
+        var tag: [4]f32 = undefined;
+        for (&tag) |*tv| tv.* = w.rng().float(f32);
+        var dig: [3]f32 = .{ 0.1 + w.rng().float(f32), 0.1 + w.rng().float(f32), 0.1 + w.rng().float(f32) };
+        gen.normalizeDigest(&dig);
+        const cid = w.foundClade(pos, tag, dig, null, 1) orelse return null;
+        _ = try w.spawnRandomBatch(cid, count);
+        return cid;
     }
 
     pub fn population(w: *const World, society: usize) u32 {
@@ -853,9 +1061,9 @@ pub const World = struct {
             var pos: Vec2 = undefined;
             var food: FoodType = .universal;
             if (k % 4 < 3) {
-                const si = k % society_count;
+                const si = k % w.clade_count;
                 pos = w.randomIn(w.territories[si].inset(16));
-                food = if (w.rng().boolean()) societies[si].food else .universal;
+                food = if (w.rng().boolean()) w.clades[si].preferredFood() else .universal;
             } else {
                 pos = w.randomIn(wild);
                 food = if (w.rng().boolean()) .universal else @fromBackingInt(@intCast(w.rng().intRangeLessThan(u8, 0, food_type_count)));
@@ -905,12 +1113,19 @@ pub const World = struct {
         w.scarcity = .none;
     }
 
-    /// Spawn a batch of fresh entities into a society's living territory.
+    /// Spawn a batch of fresh entities into a society/clade's living territory.
     pub fn spawnRandomBatch(w: *World, society: u8, count: usize) !usize {
+        if (society >= w.clade_count) return 0;
         var spawned: usize = 0;
+        const cl = w.clades[society];
         const area = w.territories[society].inset(28);
         for (0..count) |_| {
-            const g = try gen.Genome.random(w.gpa, w.rng(), w.circuit.types);
+            var g = try gen.Genome.randomForNiche(w.gpa, w.rng(), w.circuit.types, @backingInt(cl.preferredFood()), cl.centroid_tag);
+            // Blend clade's centroid diet for diverged omnivore clades.
+            if (society >= society_count) {
+                for (&g.digest, cl.centroid_digest) |*dv, cd| dv.* = @max(0.02, cd + w.rng().floatNorm(f32) * 0.05);
+                gen.normalizeDigest(&g.digest);
+            }
             const e = try w.addEntity(society, w.randomIn(area), g);
             e.age = maturity_age + w.rng().float(f32) * 20;
             e.lineage = e.id;
@@ -934,7 +1149,7 @@ pub const World = struct {
     /// Give one mature pioneer per society a small insight boost in building & toolcraft
     /// so the user can compare organic discovery vs. cultural seeding.
     pub fn inspirePioneers(w: *World) void {
-        for (0..society_count) |si| {
+        for (0..w.clade_count) |si| {
             for (w.entities.items) |*e| {
                 if (e.dead != null or e.society != si or !e.mature()) continue;
                 e.skills[@backingInt(Skill.building)] = @max(e.skills[@backingInt(Skill.building)], 0.45);
@@ -1050,38 +1265,213 @@ pub const World = struct {
         w.history_timer += dt;
         if (w.history_timer >= 2) {
             w.history_timer = 0;
-            var row: [society_count]u16 = undefined;
-            for (&row, 0..) |*r, s| r.* = @intCast(@min(w.population(s), std.math.maxInt(u16)));
+            var row: [max_societies]u16 = @splat(0);
+            for (0..w.clade_count) |s| row[s] = @intCast(@min(w.population(s), std.math.maxInt(u16)));
             if (w.history_count < history_len) {
                 w.history[w.history_count] = row;
                 w.history_count += 1;
             } else {
-                std.mem.copyForwards([society_count]u16, w.history[0 .. history_len - 1], w.history[1..]);
+                std.mem.copyForwards([max_societies]u16, w.history[0 .. history_len - 1], w.history[1..]);
                 w.history[history_len - 1] = row;
             }
         }
     }
 
+    /// Closed-loop Earth-like biogeochemical ecosystem cycle:
+    ///   - Corpses rot directly into soil_nutrients (feeding new plant & fungal blooms)
+    ///   - Metabolic waste diffuses and decomposes microbially back into soil_nutrients
+    ///   - Storms recharge soil_moisture and weather stone outcrops into mineral deposits
+    ///   - Sunlight + soil_nutrients + soil_moisture grow living plants & seed neighboring fertile ground
     fn updateFood(w: *World, dt: f32) !void {
         const rate = w.scarcity.regrowth() * w.phase.regrowth();
-        if (rate > 0) {
-            const max_items: u16 = if (w.scarcity == .feast) patch_items * 2 else patch_items;
-            for (w.patches.items, 0..) |*p, i| {
-                if (p.budget <= 0) {
-                    if (p.live == 0) w.relocate(p);
-                    continue;
+        const sun: f32 = switch (w.phase) {
+            .calm => 1.0,
+            .bloom => 1.55,
+            .storm => 0.50,
+        };
+
+        if (w.forage_only) {
+            if (rate > 0) {
+                const max_items: u16 = if (w.scarcity == .feast) patch_items * 2 else patch_items;
+                for (w.patches.items, 0..) |*p, i| {
+                    if (p.budget <= 0) {
+                        if (p.live == 0) w.relocate(p);
+                        continue;
+                    }
+                    p.timer += dt * rate;
+                    if (p.timer >= 2.5) {
+                        p.timer = 0;
+                        if (p.live < max_items) try w.spawnFood(p, @intCast(i));
+                    }
                 }
-                p.timer += dt * rate;
-                if (p.timer >= 2.5) {
-                    p.timer = 0;
-                    if (p.live < max_items) try w.spawnFood(p, @intCast(i));
+            }
+            for (w.resources.items) |*r| {
+                if (r.corpse) r.amount -= 1.2 * dt;
+                if (r.amount > 0) w.field.deposit(scentChannel(r.food), r.pos.x, r.pos.y, r.amount / food_amount * 3.0 * dt);
+            }
+            return;
+        }
+
+        // Per-frame biomass recycling, living plant photosynthesis growth, and scent emission.
+        for (w.resources.items) |*r| {
+            const cc = cellCoords(r.pos);
+            const cell = cc[1] * grid_cols + cc[0];
+            if (r.corpse) {
+                const rot = @min(r.amount, 0.65 * dt);
+                r.amount -= rot;
+                // Dead bodies return conserved organic nutrients straight back to the soil!
+                w.soil_nutrients[cell] = @min(2.5, w.soil_nutrients[cell] + rot * 0.038);
+                if (r.amount <= 0) {
+                    w.soil_nutrients[cell] = @min(2.5, w.soil_nutrients[cell] + 0.16);
                 }
+            } else if (r.food == .plant and rate > 0 and r.amount > 0 and r.amount < food_amount) {
+                const nut = w.soil_nutrients[cell];
+                const moi = w.soil_moisture[cell];
+                if (nut > 0.08 and moi > 0.12) {
+                    const growth = 3.2 * sun * rate * @min(1.5, nut) * @min(1.2, moi) * dt;
+                    const add = @min(food_amount - r.amount, growth);
+                    r.amount += add;
+                    w.soil_nutrients[cell] = @max(0.05, nut - add * 0.0045);
+                }
+            }
+            if (r.amount > 0) w.field.deposit(scentChannel(r.food), r.pos.x, r.pos.y, r.amount / food_amount * 3.0 * dt);
+        }
+
+        // 1 Hz Biogeochemical grid update: rain, waste diffusion & microbial decomposition, and organic sprouting.
+        w.eco_timer += dt;
+        if (w.eco_timer < 1.0) return;
+        const eco_dt = w.eco_timer;
+        w.eco_timer = 0;
+
+        // 1. Soil moisture & waste diffusion + microbial decomposition -> soil_nutrients.
+        for (0..grid_rows) |gy| {
+            for (0..grid_cols) |gx| {
+                const idx = gy * grid_cols + gx;
+                const c_w = w.waste[idx];
+                const l_w = w.waste[gy * grid_cols + (if (gx > 0) gx - 1 else 0)];
+                const r_w = w.waste[gy * grid_cols + (if (gx + 1 < grid_cols) gx + 1 else grid_cols - 1)];
+                const u_w = w.waste[(if (gy > 0) gy - 1 else 0) * grid_cols + gx];
+                const d_w = w.waste[(if (gy + 1 < grid_rows) gy + 1 else grid_rows - 1) * grid_cols + gx];
+                w.waste_scratch[idx] = c_w + 0.12 * (0.25 * (l_w + r_w + u_w + d_w) - c_w);
+            }
+        }
+        for (0..grid_cells) |ci| {
+            var wc = w.waste_scratch[ci];
+            const decomp = wc * @min(0.45, 0.12 * eco_dt);
+            wc -= decomp;
+            w.waste[ci] = @max(0, wc);
+
+            var nut = w.soil_nutrients[ci] + decomp * 2.2;
+            // Gentle natural mineral & nitrogen succession floor when abandoned ground rests.
+            if (rate > 0 and nut < 0.48) {
+                nut += (0.48 - nut) * 0.038 * rate * eco_dt;
+            }
+            w.soil_nutrients[ci] = std.math.clamp(nut, 0.05, 2.5);
+
+            var moi = w.soil_moisture[ci];
+            switch (w.phase) {
+                .storm => moi += 0.095 * eco_dt,
+                .bloom => moi += 0.030 * eco_dt,
+                .calm => moi += (0.62 - moi) * 0.018 * eco_dt,
+            }
+            w.soil_moisture[ci] = std.math.clamp(moi, 0.18, 1.4);
+        }
+
+        if (rate <= 0) return;
+
+        // 2. Count living food pools to keep sprouting grounded within ecological carrying capacity.
+        var plant_n: u32 = 0;
+        var mineral_n: u32 = 0;
+        var univ_n: u32 = 0;
+        var meat_n: u32 = 0;
+        for (w.resources.items) |r| {
+            if (r.amount <= 0) continue;
+            switch (r.food) {
+                .plant => plant_n += 1,
+                .mineral => mineral_n += 1,
+                .universal => univ_n += 1,
+                .meat => meat_n += 1,
+            }
+        }
+        const total_n = plant_n + mineral_n + univ_n + meat_n;
+        const max_res: u32 = if (w.scarcity == .feast) 540 else 360;
+        if (total_n >= max_res) return;
+
+        const safe = bounds.inset(24);
+        // 3. Photosynthesis & Seed Dispersal: sprout growing Plants in nutrient- and moisture-rich soil cells.
+        const plant_trials: usize = @min(12, @max(3, @as(usize, @intFromFloat(6.5 * rate * sun))));
+        for (0..plant_trials) |_| {
+            if (plant_n >= (if (w.scarcity == .feast) @as(u32, 190) else 125)) break;
+            var pos: Vec2 = undefined;
+            if (w.resources.items.len > 0 and w.rng().float(f32) < 0.50) {
+                const seed_r = w.resources.items[w.rng().uintLessThan(usize, w.resources.items.len)];
+                if (seed_r.food == .plant and seed_r.amount > 15) {
+                    const ang = w.rng().float(f32) * std.math.tau;
+                    const dist = 20 + w.rng().float(f32) * 80;
+                    pos = .{
+                        .x = std.math.clamp(seed_r.pos.x + @cos(ang) * dist, safe.x, safe.x + safe.w),
+                        .y = std.math.clamp(seed_r.pos.y + @sin(ang) * dist, safe.y, safe.y + safe.h),
+                    };
+                } else {
+                    pos = w.randomIn(safe);
+                }
+            } else {
+                pos = w.randomIn(safe);
+            }
+            const cc = cellCoords(pos);
+            const cell = cc[1] * grid_cols + cc[0];
+            if (w.soil_nutrients[cell] > 0.28 and w.soil_moisture[cell] > 0.24) {
+                const seedling_amt = 24 + 16 * @min(1.0, w.soil_nutrients[cell]);
+                try w.resources.append(w.gpa, .{ .pos = pos, .food = .plant, .amount = seedling_amt, .patch = null, .corpse = false });
+                w.soil_nutrients[cell] = @max(0.05, w.soil_nutrients[cell] - 0.10);
+                plant_n += 1;
             }
         }
 
-        for (w.resources.items) |*r| {
-            if (r.corpse) r.amount -= 1.2 * dt; // corpses rot
-            if (r.amount > 0) w.field.deposit(scentChannel(r.food), r.pos.x, r.pos.y, r.amount / food_amount * 3.0 * dt);
+        // 4. Fungal / Berry Detritivore Fruiting (.universal): blooms richly over fertile decomposed soil & graveyards!
+        const univ_trials: usize = @min(10, @max(3, @as(usize, @intFromFloat(5.5 * rate))));
+        for (0..univ_trials) |_| {
+            if (univ_n >= (if (w.scarcity == .feast) @as(u32, 180) else 115)) break;
+            const pos = w.randomIn(safe);
+            const cc = cellCoords(pos);
+            const cell = cc[1] * grid_cols + cc[0];
+            if (w.soil_nutrients[cell] > 0.34) {
+                const amt: f32 = if (w.soil_nutrients[cell] > 0.72) 45 else food_amount;
+                try w.resources.append(w.gpa, .{ .pos = pos, .food = .universal, .amount = amt, .patch = null, .corpse = false });
+                w.soil_nutrients[cell] = @max(0.05, w.soil_nutrients[cell] - 0.09);
+                univ_n += 1;
+            }
+        }
+
+        // 5. Geological Weathering (.mineral): rain & moisture leach mineral salts around stone outcrops.
+        if (w.materials.items.len > 0 and mineral_n < (if (w.scarcity == .feast) @as(u32, 145) else 95)) {
+            const weather_mult: f32 = if (w.phase == .storm) 1.55 else 1.0;
+            const min_trials: usize = @min(10, @max(4, @as(usize, @intFromFloat(5.0 * rate * weather_mult))));
+            for (0..min_trials) |_| {
+                const mat = w.materials.items[w.rng().uintLessThan(usize, w.materials.items.len)];
+                if (mat.kind != .stone or mat.amount <= 0) continue;
+                const ang = w.rng().float(f32) * std.math.tau;
+                const dist = 16 + w.rng().float(f32) * 85;
+                const pos = Vec2{
+                    .x = std.math.clamp(mat.pos.x + @cos(ang) * dist, safe.x, safe.x + safe.w),
+                    .y = std.math.clamp(mat.pos.y + @sin(ang) * dist, safe.y, safe.y + safe.h),
+                };
+                try w.resources.append(w.gpa, .{ .pos = pos, .food = .mineral, .amount = food_amount, .patch = null, .corpse = false });
+                mineral_n += 1;
+            }
+        }
+
+        // 6. Ambient wildlife carrion in hunting grounds & wild so young carnivores scavenge while
+        // learning to hunt Wild Prey; any uneaten carrion rots straight back into soil_nutrients.
+        if (meat_n < (if (w.scarcity == .feast) @as(u32, 100) else 65)) {
+            const meat_trials: usize = @min(4, @max(1, @as(usize, @intFromFloat(2.0 * rate))));
+            for (0..meat_trials) |_| {
+                if (w.rng().float(f32) < @min(0.95, 0.72 * rate)) {
+                    const area = if (w.rng().float(f32) < 0.65) w.territories[0].inset(25) else safe;
+                    try w.resources.append(w.gpa, .{ .pos = w.randomIn(area), .food = .meat, .amount = food_amount, .patch = null, .corpse = true });
+                    meat_n += 1;
+                }
+            }
         }
     }
 
@@ -1092,7 +1482,7 @@ pub const World = struct {
             if (w.materials.items.len < 54) {
                 const kind: MaterialKind = if (w.rng().boolean()) .stone else .wood;
                 const area = if (w.rng().float(f32) < 0.45)
-                    w.territories[w.rng().uintLessThan(usize, society_count)].inset(25)
+                    w.territories[w.rng().uintLessThan(usize, w.clade_count)].inset(25)
                 else
                     bounds.inset(110);
                 try w.materials.append(w.gpa, .{ .pos = w.randomIn(area), .kind = kind, .amount = 45 });
@@ -1102,14 +1492,60 @@ pub const World = struct {
 
     fn updatePrey(w: *World, dt: f32) !void {
         const edge = bounds.inset(45);
+        var calves: usize = 0;
+        var calf_pos: [4]Vec2 = undefined;
+        const rate = w.scarcity.regrowth();
+
         for (w.prey.items) |*p| {
             if (p.hp <= 0) continue;
             p.flee_timer = @max(0, p.flee_timer - dt);
             p.stagger_timer = @max(0, p.stagger_timer - dt);
+            // Trophic metabolism: prey burn energy & fertilize the ground with manure as they roam.
+            p.energy -= 0.48 * dt;
+            const cc = cellCoords(p.pos);
+            w.waste[cc[1] * grid_cols + cc[0]] = @min(2.0, w.waste[cc[1] * grid_cols + cc[0]] + 0.003 * dt);
+
             if (p.flee_timer <= 0) {
                 p.hp = @min(p.max_hp, p.hp + 1.5 * dt);
-                p.heading += w.rng().floatNorm(f32) * 0.9 * dt;
+                // Graze living plants! Steer gently toward nearby plants when hungry.
+                var best_plant: ?usize = null;
+                var best_d: f32 = 135;
+                for (w.resources.items, 0..) |*r, ri| {
+                    if (r.amount <= 0 or r.food != .plant) continue;
+                    const d = p.pos.dist(r.pos);
+                    if (d < 24) {
+                        const bite = @min(r.amount, 14 * dt);
+                        r.amount -= bite;
+                        p.energy = @min(165, p.energy + bite * 1.6);
+                        best_plant = null;
+                        break;
+                    } else if (p.energy < 120 and d < best_d) {
+                        best_d = d;
+                        best_plant = ri;
+                    }
+                }
+                if (best_plant) |pi| {
+                    p.heading += steerTo(p.heading, p.pos, w.resources.items[pi].pos, 2.2) * dt;
+                } else {
+                    p.heading += w.rng().floatNorm(f32) * 0.9 * dt;
+                }
             }
+
+            if (p.energy > 130 and rate > 0 and w.prey.items.len + calves < 16 and calves < calf_pos.len) {
+                p.energy -= 52;
+                calf_pos[calves] = .{
+                    .x = std.math.clamp(p.pos.x + (w.rng().float(f32) - 0.5) * 24, edge.x, edge.x + edge.w),
+                    .y = std.math.clamp(p.pos.y + (w.rng().float(f32) - 0.5) * 24, edge.y, edge.y + edge.h),
+                };
+                calves += 1;
+            }
+            if (p.energy <= 0) {
+                // Starved wild prey dies and drops a real corpse that feeds scavengers or rots into soil!
+                p.hp = 0;
+                try w.resources.append(w.gpa, .{ .pos = p.pos, .food = .meat, .amount = 42, .patch = null, .corpse = true });
+                continue;
+            }
+
             const spd: f32 = if (p.stagger_timer > 0) 15 else if (p.flee_timer > 0) 42 else 18;
             p.pos.x += @cos(p.heading) * spd * dt;
             p.pos.y += @sin(p.heading) * spd * dt;
@@ -1119,10 +1555,17 @@ pub const World = struct {
                 p.heading += std.math.pi;
             }
         }
+        for (0..calves) |ci| {
+            try w.prey.append(w.gpa, .{
+                .pos = calf_pos[ci],
+                .heading = w.rng().float(f32) * std.math.tau,
+                .energy = 68,
+            });
+        }
         w.prey_timer += dt;
-        if (w.prey_timer >= 45) {
+        if (w.prey_timer >= 36) {
             w.prey_timer = 0;
-            if (w.scarcity != .none and w.preyCount() < 5) try w.spawnPrey(1);
+            if (w.scarcity != .none and w.preyCount() < 7) try w.spawnPrey(1);
         }
     }
 
@@ -1226,10 +1669,8 @@ pub const World = struct {
 
             p.pos.x += @cos(p.heading) * spd * dt;
             p.pos.y += @sin(p.heading) * spd * dt;
-            // Stalking predators radiate biological predator musk into the FlyWire alarm channels (orn_alarm_L/R).
-            for (0..society_count) |sc| {
-                w.field.deposit(alarmChannel(sc), p.pos.x, p.pos.y, 1.2 * dt);
-            }
+            // Stalking predators radiate biological predator musk into the shared FlyWire alarm channel (orn_alarm_L/R).
+            w.field.deposit(alarmChannel(0), p.pos.x, p.pos.y, 1.4 * dt);
             if (!edge.contains(p.pos)) {
                 p.pos.x = std.math.clamp(p.pos.x, edge.x, edge.x + edge.w);
                 p.pos.y = std.math.clamp(p.pos.y, edge.y, edge.y + edge.h);
@@ -1387,7 +1828,12 @@ pub const World = struct {
         var odour: [2]f32 = .{ 0, 0 };
         var alarm: [2]f32 = .{ 0, 0 };
         for (ant, 0..) |a, side| {
-            odour[side] = w.field.sample(trailChannel(s), a.x, a.y);
+            // Wyatt (2010) chemical signature dot product: infinite clades in O(1) 3-channel trail basis!
+            var trail_sig: f32 = 0;
+            for (0..trail_basis_count) |bk| {
+                trail_sig += e.genome.chem_sig[bk] * w.field.sample(trailChannel(bk), a.x, a.y);
+            }
+            odour[side] = @max(0, trail_sig);
             for (0..food_type_count) |t| {
                 const edible = canEat(e, @fromBackingInt(@intCast(t)));
                 if (edible > 0) odour[side] += edible * w.field.sample(scentChannel(@fromBackingInt(@intCast(t))), a.x, a.y);
@@ -1451,16 +1897,19 @@ pub const World = struct {
         e.senses = .{ .attr_L = attr[0], .attr_R = attr[1], .alarm_L = alarm[0], .alarm_R = alarm[1], .sugar = sugar, .bitter = bitter };
         e.motor = fly.step(w.circuit, e.genome.fly_gain, e.brain, e.senses);
 
-        // Neighbours.
+        // Neighbours (with continuous genetic + dialect + trust kinship and reproductive isolation).
         e.enemy = null;
         e.ally = null;
         e.mate = null;
         e.cannibal_target = false;
         e.enemies_near = 0;
         e.allies_near = 0;
+        e.nearest_kin_sim = 0;
+        e.nearest_trust = 0;
         var close_allies: u32 = 0;
         e.enemy_dist = sense_range;
         e.ally_dist = sense_range;
+        var nearest_dist: f32 = sense_range;
         var mate_dist: f32 = sense_range;
         var weak_kin: ?u32 = null;
         var weak_kin_dist: f32 = sense_range;
@@ -1480,6 +1929,11 @@ pub const World = struct {
                     if (o.id == e.id or o.dead != null) continue;
                     const d = o.pos.dist(e.pos);
                     if (d >= sense_range) continue;
+                    if (d < nearest_dist) {
+                        nearest_dist = d;
+                        e.nearest_kin_sim = kinSimilarity(e, o);
+                        e.nearest_trust = e.trustOf(o.id);
+                    }
                     if (o.society != e.society) {
                         e.enemies_near += 1;
                         if (d < e.enemy_dist) {
@@ -1498,7 +1952,8 @@ pub const World = struct {
                             weak_kin = @intCast(oi);
                         }
                     }
-                    if (ready and o.readyToMate() and d < mate_dist) {
+                    // Biological speciation barrier: genetically distant clades cannot produce viable offspring.
+                    if (ready and o.readyToMate() and d < mate_dist and e.genome.geneticDist(&o.genome) <= 0.68) {
                         mate_dist = d;
                         e.mate = @intCast(oi);
                     }
@@ -1596,7 +2051,7 @@ pub const World = struct {
     fn act(w: *World, i: usize, dt: f32) !void {
         const e = &w.entities.items[i];
         const g = &e.genome;
-        const soc = societies[e.society];
+        const soc = w.clades[e.society];
 
         e.age += dt;
         e.since_meal += dt;
@@ -1794,6 +2249,8 @@ pub const World = struct {
                 heard_f1,
                 heard_f2,
                 dir_heard,
+                e.nearest_kin_sim,
+                e.nearest_trust,
             }, motor_noise);
         }
 
@@ -2067,12 +2524,14 @@ pub const World = struct {
             e.resting = false;
         }
 
-        e.heading += if (e.resting) 0 else turn * dt;
+        e.heading += if (e.resting) 0 else turn * soc.shape.turnMult() * dt;
 
         // Speed: DNp09 drives walking, MDN backs up, the giant fibre bolts, MN9 stops to feed.
-        const base = 30 + 40 * g.trait(.speed);
+        // Honest shape morphology trade-offs scale speed, turning agility, energy cap, and storm insulation.
+        const base = (30 + 40 * g.trait(.speed)) * soc.shape.speedMult();
         const walk_base: f32 = if (w.pure_neural and !w.forage_only) 0.55 else 0.5;
         var speed = base * (walk_base + g.motorGene(.forward) * m.fwd);
+        const cap_energy = max_energy * soc.shape.energyCapMult() * g.body_scale;
         if (m.back > 0.3) speed = -0.4 * base;
         if (m.escape > 0.5 and e.escape_timer <= -1) e.escape_timer = 0.4;
         if (e.escape_timer > 0) speed = base * 2.5;
@@ -2119,7 +2578,7 @@ pub const World = struct {
                     const bite = @min(r.amount, 30 * (1 + 0.35 * fskill) * basket_mult * m.feed * dt);
                     r.amount -= bite;
                     const gained = bite * value * (1 + 0.25 * fskill);
-                    e.energy = @min(max_energy, e.energy + gained);
+                    e.energy = @min(cap_energy, e.energy + gained);
                     e.food_eaten += gained;
                     e.since_meal = 0;
                     e.addSkill(.foraging, bite * 0.004);
@@ -2191,16 +2650,22 @@ pub const World = struct {
             e.heading += std.math.pi;
         }
 
-        // Lay a food trail for a while after eating.
+        // Lay a Wyatt (2010) signature-mixture food trail across the 3 shared trail basis channels.
         if (e.since_meal < 12) {
-            w.field.deposit(trailChannel(e.society), e.pos.x, e.pos.y, g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt);
+            const t_amt = g.trait(.trail_output) * 2.0 * @exp(-e.since_meal / 5) * dt;
+            for (0..trail_basis_count) |bk| {
+                w.field.deposit(trailChannel(bk), e.pos.x, e.pos.y, t_amt * g.chem_sig[bk]);
+            }
         }
 
-        // Metabolism, harsher in hard environments and during world storms; shelters, resting & huddling conserve energy.
-        // Larger cognitive brains also carry a small real metabolic upkeep so only useful growth survives selection.
+        // Metabolism: Kleiber allometric scaling (scale^0.75), honest shape insulation, crowding waste stress,
+        // and real matter recycling (burned biomass returns organic waste -> soil_nutrients!).
         const shelter_mult: f32 = if (e.in_shelter) 0.35 else if (w.phase == .storm and e.huddled) 0.55 else 1.0;
         const rest_mult: f32 = if (e.resting) 0.45 else 1.0;
-        const harsh = (if (home_rect.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * shelter_mult;
+        const my_cc = cellCoords(e.pos);
+        const my_cell = my_cc[1] * grid_cols + my_cc[0];
+        const waste_stress: f32 = if (!w.forage_only and w.waste[my_cell] > 0.35) (w.waste[my_cell] - 0.35) * 0.45 else 0;
+        const harsh = ((if (home_rect.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * soc.shape.insulationMult() + waste_stress) * shelter_mult;
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
         const carry_cost: f32 = if (e.carrying != .none) 0.12 else 0;
         const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0002 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
@@ -2210,8 +2675,13 @@ pub const World = struct {
             .adult => 1.0,
             .elder => 0.92,
         };
-        const drain = (0.38 + 0.55 * g.trait(.speed) - 0.35 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult * stage_drain;
+        const kleiber = std.math.pow(f32, g.body_scale, 0.75);
+        const drain = (0.38 + 0.55 * g.trait(.speed) - 0.35 * g.trait(.efficiency) + move_cost + carry_cost + brain_cost) * (1 + 0.5 * harsh) * rest_mult * stage_drain * kleiber;
         e.energy -= drain * dt;
+        // Return fraction of metabolized biomass as organic waste (decomposes back into soil_nutrients!).
+        if (!w.forage_only) {
+            w.waste[my_cell] = @min(2.0, w.waste[my_cell] + drain * 0.0085 * dt);
+        }
         if (e.energy < 25) e.genome.cog.learn(-0.08 * dt);
 
         // Emergent material gathering, tool-crafting, stigmergic building, cache use, and wild prey hunting.
@@ -2542,7 +3012,10 @@ pub const World = struct {
     }
 
     fn kill(w: *World, i: usize, cause: Death) !void {
-        try w.killCorpse(i, cause, 30);
+        const e = w.entities.items[i];
+        // Conserve biomass on every death (starvation, old age, combat) so dead bodies feed scavengers & soil!
+        const bio = @max(@as(f32, 18.0), e.energy * 0.55 + 16.0 * e.genome.body_scale);
+        try w.killCorpse(i, cause, bio);
     }
 
     fn killCorpse(w: *World, i: usize, cause: Death, corpse_amount: f32) !void {
@@ -2550,12 +3023,13 @@ pub const World = struct {
         e.dead = cause;
         w.stats[e.society].deaths[@backingInt(cause)] += 1;
         w.field.deposit(alarmChannel(e.society), e.pos.x, e.pos.y, 8);
-        if (cause != .old_age or w.rng().boolean()) {
-            try w.resources.append(w.gpa, .{ .pos = e.pos, .food = .meat, .amount = corpse_amount, .patch = null, .corpse = true });
-        }
+        try w.resources.append(w.gpa, .{ .pos = e.pos, .food = .meat, .amount = corpse_amount, .patch = null, .corpse = true });
     }
 
     fn reproduce(w: *World, ai: usize, bi: usize) !void {
+        const gdist = w.entities.items[ai].genome.geneticDist(&w.entities.items[bi].genome);
+        // True reproductive isolation: genetically diverged clades cannot interbreed.
+        if (gdist > 0.68) return;
         const genome = blk: {
             const a = &w.entities.items[ai];
             const b = &w.entities.items[bi];
@@ -2563,14 +3037,51 @@ pub const World = struct {
         };
         const a = w.entities.items[ai];
         const b = w.entities.items[bi];
-        const society = if (a.society == b.society or w.rng().boolean()) a.society else b.society;
+        var society = if (a.society == b.society or w.rng().boolean()) a.society else b.society;
         const pos = Vec2{
             .x = (a.pos.x + b.pos.x) / 2 + (w.rng().float(f32) - 0.5) * 20,
             .y = (a.pos.y + b.pos.y) / 2 + (w.rng().float(f32) - 0.5) * 20,
         };
+        // Dynamic speciation (cladogenesis): bud a brand-new clade (up to max_societies = 16) when
+        // either a same-clade lineage drifts far from its founder centroid (tag_drift > 0.50 or diet_drift > 0.90)
+        // OR two hybrids establish a new homoploid hybrid species — and invite nearby close-kin into the founding troop!
+        const parent_clade = w.clades[society];
+        const tag_drift = genome.tagDistTo(parent_clade.centroid_tag, parent_clade.centroid_digest);
+        const diet_drift = @abs(genome.digest[0] - parent_clade.centroid_digest[0]) +
+            @abs(genome.digest[1] - parent_clade.centroid_digest[1]) +
+            @abs(genome.digest[2] - parent_clade.centroid_digest[2]);
+        const same_clade_split = a.society == b.society and (tag_drift > 0.50 or diet_drift > 0.92);
+        const hybrid_lineage_split = a.hybrid and b.hybrid and tag_drift > 0.36;
+        const gen_next = @max(a.generation, b.generation) + 1;
+        var budded_from: ?u8 = null;
+        if (w.clade_count < max_societies and (same_clade_split or hybrid_lineage_split)) {
+            if (w.foundClade(pos, genome.kin_tag, genome.digest, society, gen_next)) |new_cid| {
+                budded_from = society;
+                society = new_cid;
+            }
+        } else {
+            // Gently track the living clade's genetic & dietary center of mass.
+            for (&w.clades[society].centroid_tag, genome.kin_tag) |*ct, kv| ct.* += (kv - ct.*) * 0.02;
+            for (&w.clades[society].centroid_digest, genome.digest) |*cd, dv| cd.* += (dv - cd.*) * 0.02;
+            gen.normalizeDigest(&w.clades[society].centroid_digest);
+        }
         // addEntity may reallocate the list, so parents were copied above.
         const child = try w.addEntity(society, pos, genome);
-        child.generation = @max(a.generation, b.generation) + 1;
+        child.generation = gen_next;
+        // True cladogenesis: when a new clade buds, parents & nearby genetically matching kin join the founding troop!
+        if (budded_from) |old_soc| {
+            const new_cl = w.clades[society];
+            const old_cl = w.clades[old_soc];
+            for (w.entities.items) |*other| {
+                if (other.dead != null or other.society != old_soc) continue;
+                if (other.pos.dist(pos) > 130) continue;
+                const d_new = other.genome.tagDistTo(new_cl.centroid_tag, new_cl.centroid_digest);
+                const d_old = other.genome.tagDistTo(old_cl.centroid_tag, old_cl.centroid_digest);
+                if (other.id == a.id or other.id == b.id or d_new < d_old) {
+                    other.society = society;
+                }
+            }
+        }
         child.parents = .{ a.id, b.id };
         child.hybrid = a.society != b.society or a.hybrid or b.hybrid;
         child.lineage = if (a.society != b.society) child.id else if (w.rng().boolean()) a.lineage else b.lineage;
@@ -2661,7 +3172,7 @@ pub const World = struct {
     /// Gently shift and resize each society's living territory toward where its population actually lives.
     fn updateTerritories(w: *World) void {
         const safe = bounds.inset(40);
-        for (0..society_count) |si| {
+        for (0..w.clade_count) |si| {
             var sx: f32 = 0;
             var sy: f32 = 0;
             var n: f32 = 0;
@@ -2686,9 +3197,9 @@ pub const World = struct {
             cur.* = .{ .x = nx, .y = ny, .w = nw, .h = nh };
         }
         // Keep living territories from collapsing completely on top of one another while still allowing border clashes.
-        for (0..society_count) |a| {
+        for (0..w.clade_count) |a| {
             if (w.stats[a].status == .extinct) continue;
-            for (a + 1..society_count) |b| {
+            for (a + 1..w.clade_count) |b| {
                 if (w.stats[b].status == .extinct) continue;
                 const ca = w.territories[a].center();
                 const cb = w.territories[b].center();
@@ -2709,7 +3220,7 @@ pub const World = struct {
     }
 
     fn updateSocietyStatuses(w: *World) void {
-        for (0..society_count) |si| {
+        for (0..w.clade_count) |si| {
             const pop = w.population(si);
             const st = &w.stats[si];
             const prev = st.status;
@@ -2726,26 +3237,31 @@ pub const World = struct {
                 .stable;
             st.status = next;
 
-            if (next == .extinct and prev != .extinct) {
-                st.extinct_time = w.time;
-                w.pushEvent(@intCast(si), .extinct, st.max_gen);
-            } else if (next == .endangered and prev != .endangered and prev != .extinct) {
-                w.pushEvent(@intCast(si), if (pop <= 3) .critical else .endangered, pop);
-            } else if ((prev == .endangered or prev == .struggling) and pop >= 15) {
-                w.pushEvent(@intCast(si), .recovered, pop);
-            }
-            if (pop >= st.boom_milestone) {
-                w.pushEvent(@intCast(si), .boom, pop);
-                st.boom_milestone += 50;
-            }
-            if (!st.had_hybrid_majority and pop >= 10) {
-                var hyb: u32 = 0;
-                for (w.entities.items) |e| {
-                    if (e.dead == null and e.society == si and e.hybrid) hyb += 1;
+            // Bedau persistence filter: only broadcast status alarms for founder societies or
+            // newly speciated clades that have reached >= 4 members or >= 2 generations!
+            const persistent = si < society_count or st.peak_pop >= 4 or st.max_gen >= 2;
+            if (persistent) {
+                if (next == .extinct and prev != .extinct) {
+                    st.extinct_time = w.time;
+                    w.pushEvent(@intCast(si), .extinct, st.max_gen);
+                } else if (next == .endangered and prev != .endangered and prev != .extinct) {
+                    w.pushEvent(@intCast(si), if (pop <= 3) .critical else .endangered, pop);
+                } else if ((prev == .endangered or prev == .struggling) and pop >= 15) {
+                    w.pushEvent(@intCast(si), .recovered, pop);
                 }
-                if (hyb * 2 >= pop) {
-                    st.had_hybrid_majority = true;
-                    w.pushEvent(@intCast(si), .hybrid_majority, pop);
+                if (pop >= st.boom_milestone) {
+                    w.pushEvent(@intCast(si), .boom, pop);
+                    st.boom_milestone += 50;
+                }
+                if (!st.had_hybrid_majority and pop >= 10) {
+                    var hyb: u32 = 0;
+                    for (w.entities.items) |e| {
+                        if (e.dead == null and e.society == si and e.hybrid) hyb += 1;
+                    }
+                    if (hyb * 2 >= pop) {
+                        st.had_hybrid_majority = true;
+                        w.pushEvent(@intCast(si), .hybrid_majority, pop);
+                    }
                 }
             }
         }
@@ -2754,9 +3270,9 @@ pub const World = struct {
         if (w.clash_cooldown > 0) {
             w.clash_cooldown = @max(0, w.clash_cooldown - 1.0);
         } else {
-            outer: for (0..society_count) |a| {
+            outer: for (0..w.clade_count) |a| {
                 if (w.stats[a].status == .extinct) continue;
-                for (a + 1..society_count) |b| {
+                for (a + 1..w.clade_count) |b| {
                     if (w.stats[b].status == .extinct) continue;
                     const ra = w.territories[a];
                     const rb = w.territories[b];
@@ -2801,9 +3317,9 @@ pub const World = struct {
     pub fn dialectDivergence(w: *const World) f32 {
         var sum: f32 = 0;
         var pairs: f32 = 0;
-        for (0..society_count) |a| {
+        for (0..w.clade_count) |a| {
             if (w.stats[a].signals_sent < 3) continue;
-            for (a + 1..society_count) |b| {
+            for (a + 1..w.clade_count) |b| {
                 if (w.stats[b].signals_sent < 3) continue;
                 const d0 = w.stats[a].vocal_mean[0] - w.stats[b].vocal_mean[0];
                 const d1 = w.stats[a].vocal_mean[1] - w.stats[b].vocal_mean[1];
@@ -2885,9 +3401,11 @@ pub const World = struct {
                     }
                     if (o.society == soc) {
                         st.signals_acted += 1;
-                        // Cultural vocal learning: infants/juveniles gently tune toward nearby mature kin's dialect.
-                        if (!o.mature() and sender_mature and d < 160) {
-                            o.genome.cog.imitateVocal(vec, 0.035);
+                        // Cultural vocal learning with joint-attention gating (Tomasello 2008):
+                        // accent drifts across hearing range, while context-binding synapses update only nearby / under shared arousal.
+                        if (!o.mature() and sender_mature and d < 180) {
+                            const joint_attn = d < 75 or (o.genome.cog.noradrenaline > 0.55 and sender.genome.cog.noradrenaline > 0.55);
+                            o.genome.cog.imitateVocal(vec, 0.035, joint_attn);
                         }
                     }
                 }
@@ -3336,8 +3854,41 @@ pub const World = struct {
     }
 };
 
-fn initTerritories() [society_count]Rect {
-    var out: [society_count]Rect = undefined;
+fn initClades() [max_societies]Clade {
+    var out: [max_societies]Clade = @splat(.{});
+    const founder_tags = [society_count][4]f32{
+        .{ 0.82, 0.28, 0.28, 0.50 }, // Triangles
+        .{ 0.28, 0.48, 0.82, 0.50 }, // Circles
+        .{ 0.28, 0.82, 0.36, 0.50 }, // Squares
+    };
+    const founder_digests = [society_count][3]f32{
+        .{ 0.84, 0.08, 0.08 }, // Meat specialist
+        .{ 0.08, 0.84, 0.08 }, // Plant specialist
+        .{ 0.08, 0.08, 0.84 }, // Mineral specialist
+    };
+    for (societies, 0..) |s, i| {
+        var c = Clade{
+            .shape = s.shape,
+            .color = s.color,
+            .centroid_tag = founder_tags[i],
+            .centroid_digest = founder_digests[i],
+            .parent_clade = null,
+            .founded_at = 0,
+            .harshness = s.harshness,
+        };
+        const nlen = @min(s.name.len, c.name_buf.len);
+        @memcpy(c.name_buf[0..nlen], s.name[0..nlen]);
+        c.name_len = @intCast(nlen);
+        const elen = @min(s.environment.len, c.env_buf.len);
+        @memcpy(c.env_buf[0..elen], s.environment[0..elen]);
+        c.env_len = @intCast(elen);
+        out[i] = c;
+    }
+    return out;
+}
+
+fn initTerritories() [max_societies]Rect {
+    var out: [max_societies]Rect = @splat(.{ .x = -190, .y = -160, .w = 380, .h = 320 });
     for (societies, 0..) |s, i| out[i] = s.territory;
     return out;
 }

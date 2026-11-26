@@ -38,6 +38,10 @@ pub const Circuit = struct {
     row_ptr: []u32, // CSR by postsynaptic neuron
     pre: []u32,
     weight: []f32, // signed synapse count
+    // CSC (presynaptic-major) index built on parse for sparse zero-skipping in step().
+    col_ptr: []u32,
+    post: []u32,
+    csc_weight: []f32,
     ports: [port_count][]u32,
 
     pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Circuit {
@@ -64,6 +68,25 @@ pub const Circuit = struct {
             const name = std.mem.sliceTo(r.take(16), 0);
             if (!std.mem.eql(u8, name, @tagName(@as(Port, @fromBackingInt(@intCast(i)))))) return error.PortMismatch;
             p.* = try r.u32s(gpa, r.u32le());
+        }
+
+        // Transpose CSR -> CSC (presynaptic-major) so step() skips inactive neurons (r <= 1e-4).
+        c.col_ptr = try gpa.alloc(u32, n + 1);
+        @memset(c.col_ptr, 0);
+        for (c.pre) |j| c.col_ptr[j + 1] += 1;
+        for (0..n) |j| c.col_ptr[j + 1] += c.col_ptr[j];
+        c.post = try gpa.alloc(u32, e);
+        c.csc_weight = try gpa.alloc(f32, e);
+        const cursor = try gpa.dupe(u32, c.col_ptr[0..n]);
+        defer gpa.free(cursor);
+        for (0..n) |i| {
+            for (c.row_ptr[i]..c.row_ptr[i + 1]) |k| {
+                const j = c.pre[k];
+                const dst = cursor[j];
+                c.post[dst] = @intCast(i);
+                c.csc_weight[dst] = c.weight[k];
+                cursor[j] += 1;
+            }
         }
         return c;
     }
@@ -111,29 +134,35 @@ pub const Motor = struct {
     feed: f32 = 0,
 };
 
-/// Per-entity neural state.
+/// Per-entity neural state backed by a single contiguous allocation (v, r, acc) for cache locality.
 pub const State = struct {
+    buf: []f32,
     v: []f32,
     r: []f32,
+    acc: []f32,
 
     pub fn init(gpa: std.mem.Allocator, c: *const Circuit) !State {
-        const v = try gpa.alloc(f32, c.neurons);
-        @memset(v, 0);
-        const r = try gpa.alloc(f32, c.neurons);
-        @memset(r, 0);
-        return .{ .v = v, .r = r };
+        const n: usize = c.neurons;
+        const buf = try gpa.alloc(f32, n * 3);
+        @memset(buf, 0);
+        return .{
+            .buf = buf,
+            .v = buf[0..n],
+            .r = buf[n .. 2 * n],
+            .acc = buf[2 * n .. 3 * n],
+        };
     }
 
     pub fn deinit(s: State, gpa: std.mem.Allocator) void {
-        gpa.free(s.v);
-        gpa.free(s.r);
+        gpa.free(s.buf);
     }
 };
 
 /// Euler step as a fraction of the membrane time constant.
 pub const dt_over_tau: f32 = 0.5;
 
-/// Advance the circuit one tick. `type_gain` has one entry per cell type.
+/// Advance the circuit one tick using CSC presynaptic-major zero-skipping.
+/// `type_gain` has one entry per cell type.
 pub fn step(c: *const Circuit, type_gain: []const f32, s: State, senses: Senses) Motor {
     // Drive sensory neurons.
     const drive = [_]struct { Port, f32 }{
@@ -143,14 +172,18 @@ pub fn step(c: *const Circuit, type_gain: []const f32, s: State, senses: Senses)
         .{ .bitter_L, senses.bitter },     .{ .bitter_R, senses.bitter },
     };
 
-    // Integrate synaptic input from the previous rates.
-    for (0..c.neurons) |i| {
-        var input: f32 = 0;
-        for (c.row_ptr[i]..c.row_ptr[i + 1]) |k| {
-            const j = c.pre[k];
-            input += c.weight[k] * s.r[j] * type_gain[c.type_of[j]];
+    // Integrate synaptic input from active presynaptic rates only (skips 80-90% of zero-rate edges).
+    @memset(s.acc, 0);
+    for (0..c.neurons) |j| {
+        const rj = s.r[j];
+        if (rj <= 1e-4) continue;
+        const scaled = rj * type_gain[c.type_of[j]];
+        for (c.col_ptr[j]..c.col_ptr[j + 1]) |k| {
+            s.acc[c.post[k]] += c.csc_weight[k] * scaled;
         }
-        s.v[i] += dt_over_tau * (c.gain * input - s.v[i]);
+    }
+    for (0..c.neurons) |i| {
+        s.v[i] += dt_over_tau * (c.gain * s.acc[i] - s.v[i]);
     }
     for (drive) |d| {
         for (c.ports[@backingInt(d[0])]) |i| s.v[i] += dt_over_tau * d[1];

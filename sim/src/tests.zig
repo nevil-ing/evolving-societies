@@ -83,6 +83,7 @@ fn chemotaxis(steer: bool, seed: u64) !usize {
     for (w.entities.items) |*e| {
         const a = prng.random().float(f32) * std.math.tau;
         e.society = 1;
+        e.genome.digest = .{ 0.08, 0.84, 0.08 };
         e.pos = .{ .x = home.x + 150 * @cos(a), .y = home.y + 150 * @sin(a) };
         e.genome.traits[@backingInt(gen.Trait.territoriality)] = 1;
         e.energy = sim.max_energy;
@@ -184,7 +185,8 @@ test "world: hungry adaptable entity eats foreign food instead of passing over i
         last.brain.deinit(gpa);
     }
     const e = &w.entities.items[0];
-    e.society = 1; // Circles (native food: plant)
+    e.society = 1; // Circles (plant specialist)
+    e.genome.digest = .{ 0.08, 0.84, 0.08 };
     e.hybrid = true; // can eat meat at 50%
     e.age = 40;
     e.energy = 30;
@@ -216,6 +218,8 @@ test "world: skills pass down to offspring and civilization alerts fire" {
     }
     for (w.entities.items, 0..) |*e, idx| {
         e.society = 1;
+        e.genome.kin_tag = w.clades[1].centroid_tag;
+        e.genome.digest = w.clades[1].centroid_digest;
         e.age = sim.maturity_age + 20;
         e.energy = 140;
         e.repro_cooldown = 0;
@@ -306,10 +310,10 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
     // Run a decision then apply positive reward: weights, predictor, continuous outputs, and dopamine should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0, 0, 0, 0, 0.6, 0.2 });
     try std.testing.expect(@abs(brain.call_out) <= 1.0);
     // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
-    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     var hidden_mag: f32 = 0;
     for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
     try std.testing.expect(hidden_mag > 1e-3);
@@ -345,6 +349,7 @@ test "world: starving entity spots nearby food visually and eats instead of idli
     }
     const e = &w.entities.items[0];
     e.society = 2; // Squares (mineral)
+    e.genome.digest = .{ 0.08, 0.08, 0.84 };
     e.age = 40;
     e.energy = 28; // starving
     e.pos = .{ .x = 0, .y = 0 };
@@ -402,6 +407,7 @@ test "world: food call recruits distant hungry kin toward shared food" {
     // Caller feeding at (0, 0); hungry kin 160 units away (beyond visual sight!).
     const caller = &w.entities.items[0];
     caller.society = 1;
+    caller.genome.digest = .{ 0.08, 0.84, 0.08 };
     caller.age = 40;
     caller.energy = 80;
     caller.pos = .{ .x = 0, .y = 0 };
@@ -503,6 +509,7 @@ test "world: starvation cannibalism emerges when all food is removed" {
     }
     const hunter = &w.entities.items[0];
     hunter.society = 0; // Triangles (meat-eater)
+    hunter.genome.digest = .{ 0.84, 0.08, 0.08 };
     hunter.age = sim.maturity_age + 20;
     hunter.energy = 32;
     hunter.since_meal = 28;
@@ -558,11 +565,12 @@ test "world: entities craft stone spears and hunt wild prey for a rich harvest" 
     }
     const hunter = &w.entities.items[0];
     hunter.society = 1;
+    hunter.genome.digest = .{ 0.08, 0.84, 0.08 };
     hunter.age = sim.maturity_age + 20;
     hunter.energy = 85;
     hunter.pos = .{ .x = 0, .y = 0 };
     hunter.carrying = .stone;
-    hunter.skills[@backingInt(sim.Skill.toolcraft)] = 0.8;
+    hunter.skills[@backingInt(sim.Skill.toolcraft)] = 1.0;
     hunter.genome.traits[@backingInt(gen.Trait.aggression)] = 0.9;
     hunter.genome.traits[@backingInt(gen.Trait.speed)] = 0.95;
     hunter.genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.craft_tool)] = 4.0;
@@ -577,7 +585,10 @@ test "world: entities craft stone spears and hunt wild prey for a rich harvest" 
     // Phase 2: hunt the Wild Prey when brain chooses fight.
     w.entities.items[0].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.craft_tool)] = 0;
     w.entities.items[0].genome.cog.bias[gen.max_cog_hidden + @backingInt(gen.SocialAction.fight)] = 4.0;
-    for (0..60 * 5) |_| try w.step(1.0 / 60.0);
+    for (0..60 * 5) |_| {
+        try w.step(1.0 / 60.0);
+        if (w.stats[1].prey_hunted >= 1) break;
+    }
 
     try std.testing.expect(w.stats[1].prey_hunted >= 1);
     // Hunted wild prey drops rich food items into the world.
@@ -857,6 +868,7 @@ test "world: blank-slate pure neural entity learns online to turn toward visible
     // Blank-slate starving entity facing AWAY from food with ZERO initial turn weight and ZERO FlyWire steering!
     const e = &w.entities.items[0];
     e.society = 2; // Squares (mineral)
+    e.genome.digest = .{ 0.08, 0.08, 0.84 };
     e.age = sim.maturity_age + 20;
     e.energy = 38;
     e.pos = .{ .x = 0, .y = 0 };
@@ -960,4 +972,171 @@ test "world: emergent language broadcasts 3-channel vocalizations, eavesdropping
     // Youth's vocal formant biases shifted culturally toward the mature kin's token!
     try std.testing.expect(w.entities.items[1].genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 4] > 0.01);
     try std.testing.expect(w.entities.items[1].genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 5] < -0.01);
+}
+
+test "stage A+: negative TD decays weights cleanly, double-buffered hidden pass, NEAT crossover, and joint-attention vocal imitation" {
+    var prng = std.Random.DefaultPrng.init(1337);
+    const rng = prng.random();
+    var b = gen.CognitiveBrain.random(rng);
+    b.synapse_count = 1;
+    b.synapses[0] = .{ .from = 0, .to = gen.out_base + 0, .weight = 2.0, .innov = 10, .active = true };
+    b.hebb_a = 0.0;
+    b.hebb_b = 0.0;
+    b.hebb_c = 0.0;
+    b.hebb_d = 0.0;
+    b.hebb_lr = 0.10;
+    b.mod_out = 0.0;
+    b.pred_w = @splat(0);
+    b.pred_bias = 0;
+
+    // Repeated negative reward (punishment) must decay |weight| toward 0, NEVER invert sign to push toward +/-4.0 saturation!
+    const start_abs = @abs(b.synapses[0].weight);
+    for (0..25) |_| {
+        _ = b.decide(@splat(0));
+        b.learn(-1.0);
+    }
+    try std.testing.expect(@abs(b.synapses[0].weight) < start_abs);
+    try std.testing.expect(@abs(b.synapses[0].weight) < 2.0);
+
+    // Double-buffered hidden pass: h0 -> h1 synapse must read h0 from PREVIOUS tick, not same tick.
+    var rec = gen.CognitiveBrain{};
+    rec.hidden_count = 2;
+    rec.synapse_count = 2;
+    rec.synapses[0] = .{ .from = 0, .to = gen.social_inputs + 0, .weight = 2.0, .innov = 1, .active = true };
+    rec.synapses[1] = .{ .from = gen.social_inputs + 0, .to = gen.social_inputs + 1, .weight = 2.0, .innov = 2, .active = true };
+    var inp: [gen.social_inputs]f32 = @splat(0);
+    inp[0] = 1.0;
+    _ = rec.decide(inp);
+    try std.testing.expect(rec.act[gen.social_inputs + 0] > 0.4);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), rec.act[gen.social_inputs + 1], 1e-5);
+    _ = rec.decide(inp);
+    try std.testing.expect(rec.act[gen.social_inputs + 1] > 0.2);
+
+    // NEAT innovation crossover aligns matching innovation IDs instead of positional array slots.
+    var p1 = gen.CognitiveBrain{};
+    var p2 = gen.CognitiveBrain{};
+    p1.synapse_count = 1;
+    p1.synapses[0] = .{ .from = 1, .to = gen.out_base + 1, .weight = 1.5, .innov = 777, .active = true };
+    p2.synapse_count = 2;
+    p2.synapses[0] = .{ .from = 2, .to = gen.out_base + 2, .weight = -1.2, .innov = 888, .active = true };
+    p2.synapses[1] = .{ .from = 1, .to = gen.out_base + 1, .weight = 1.5, .innov = 777, .active = true };
+    const kid = gen.CognitiveBrain.child(rng, &p1, &p2, 0.0);
+    try std.testing.expect(kid.findSynapseByInnov(777) != null);
+
+    // Joint-attention gating on imitateVocal: bind_context=false shifts accent bias only, never context weights!
+    var v = gen.CognitiveBrain{};
+    v.act[0] = 1.0;
+    v.synapse_count = 1;
+    v.synapses[0] = .{ .from = 0, .to = gen.out_base + gen.action_outputs + 4, .weight = 0.0, .innov = 999, .active = true };
+    v.imitateVocal(.{ 1.0, -1.0, 0.5 }, 0.1, false);
+    try std.testing.expect(v.bias[gen.max_cog_hidden + gen.action_outputs + 4] > 0.05);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), v.synapses[0].weight, 1e-6);
+    v.imitateVocal(.{ 1.0, -1.0, 0.5 }, 0.1, true);
+    try std.testing.expect(v.synapses[0].weight > 0.01);
+}
+
+test "stage B: evolvable diet trade-off, Wyatt chemical signatures, and closed-loop corpse-to-soil-to-plant-to-prey cycle" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 202601);
+    // 1. Specialist vs generalist digestion yield trade-off.
+    const spec = &w.entities.items[0];
+    spec.hybrid = false;
+    spec.genome.digest = .{ 0.90, 0.05, 0.05 };
+    try std.testing.expect(World.canEat(spec, .meat) > 0.95);
+    try std.testing.expectEqual(@as(f32, 0.0), World.canEat(spec, .plant));
+    spec.genome.digest = .{ 0.34, 0.33, 0.33 };
+    try std.testing.expect(World.canEat(spec, .meat) > 0.25 and World.canEat(spec, .meat) < 0.50);
+    try std.testing.expect(World.canEat(spec, .plant) > 0.25 and World.canEat(spec, .plant) < 0.50);
+
+    // 2. Closed-loop corpse -> soil_nutrients -> plant growth & wild prey grazing.
+    w.resources.clearRetainingCapacity();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    while (w.entities.items.len > 1) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    w.entities.items[0].pos = .{ .x = -900, .y = -700 };
+    w.soil_nutrients = @splat(0.30);
+    w.soil_moisture = @splat(0.85);
+    const spot = sim.Vec2{ .x = 0, .y = 0 };
+    const cx: usize = @intFromFloat((spot.x - sim.bounds.x) / sim.grid_cell);
+    const cy: usize = @intFromFloat((spot.y - sim.bounds.y) / sim.grid_cell);
+    const cell = cy * sim.grid_cols + cx;
+    const nut_before = w.soil_nutrients[cell];
+
+    // Drop a rotting corpse at (0,0) and a small seedling plant nearby at (10,0).
+    try w.resources.append(gpa, .{ .pos = spot, .food = .meat, .amount = 30, .patch = null, .corpse = true });
+    try w.resources.append(gpa, .{ .pos = .{ .x = 10, .y = 0 }, .food = .plant, .amount = 10, .patch = null, .corpse = false });
+    // Step 12 seconds: corpse rots into soil_nutrients and living plant grows by photosynthesis!
+    for (0..60 * 12) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.soil_nutrients[cell] > nut_before + 0.05);
+    var grew = false;
+    for (w.resources.items) |r| {
+        if (r.food == .plant and r.pos.dist(.{ .x = 10, .y = 0 }) < 1.0 and r.amount > 16.0) grew = true;
+    }
+    try std.testing.expect(grew);
+
+    // Wild Prey grazing plants gains energy and reproduces a calf when well-fed!
+    try w.prey.append(gpa, .{ .pos = .{ .x = 10, .y = 0 }, .heading = 0, .energy = 122 });
+    for (0..60 * 3) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.prey.items.len >= 2);
+}
+
+test "stage B: true speciation creates dynamic clades beyond 3 and reproductive isolation blocks distant mating" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 202602);
+    try std.testing.expectEqual(@as(usize, 3), w.clade_count);
+
+    // 1. Seed a brand-new dynamic clade beyond the 3 founders!
+    const cid = (try w.spawnNewClade(5)).?;
+    try std.testing.expectEqual(@as(u8, 3), cid);
+    try std.testing.expectEqual(@as(usize, 4), w.clade_count);
+    try std.testing.expectEqual(@as(u32, 5), w.population(3));
+
+    // 2. Reproductive isolation: two genetically distant creatures (dist > 0.68) must NOT mate.
+    while (w.entities.items.len > 2) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+    const a = &w.entities.items[0];
+    const b = &w.entities.items[1];
+    a.society = 0;
+    b.society = 1;
+    a.age = sim.maturity_age + 50;
+    b.age = sim.maturity_age + 50;
+    a.energy = 140;
+    b.energy = 140;
+    a.repro_cooldown = 0;
+    b.repro_cooldown = 0;
+    a.pos = .{ .x = 0, .y = 0 };
+    b.pos = .{ .x = 12, .y = 0 };
+    a.genome.kin_tag = .{ 0.0, 0.0, 0.0, 0.0 };
+    b.genome.kin_tag = .{ 1.0, 1.0, 1.0, 1.0 }; // geneticDist == 1.0 > 0.68!
+    try std.testing.expect(a.genome.geneticDist(&b.genome) > 0.68);
+    for (0..60) |_| try w.step(1.0 / 60.0);
+    try std.testing.expectEqual(@as(usize, 2), w.entities.items.len);
+
+    // 3. Diverged same-clade pair (close to each other, far from clade centroid) buds a NEW clade (#5)!
+    w.entities.items[0].genome.kin_tag = .{ 0.95, 0.05, 0.95, 0.95 };
+    w.entities.items[1].genome.kin_tag = .{ 0.95, 0.05, 0.95, 0.95 };
+    w.entities.items[0].society = 1;
+    w.entities.items[1].society = 1;
+    w.entities.items[0].pos = .{ .x = 0, .y = 0 };
+    w.entities.items[1].pos = .{ .x = 14, .y = 0 };
+    w.entities.items[0].energy = 140;
+    w.entities.items[1].energy = 140;
+    for (0..90) |_| try w.step(1.0 / 60.0);
+    try std.testing.expect(w.entities.items.len >= 3);
+    try std.testing.expect(w.clade_count >= 5);
 }

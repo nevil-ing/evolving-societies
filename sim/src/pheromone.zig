@@ -82,18 +82,49 @@ pub const Field = struct {
     pub fn update(f: *Field, dt: f32) void {
         const cols = f.cols;
         const rows = f.rows;
+        const V = @Vector(8, f32);
+        const qv: V = @splat(0.25);
         for (f.data, f.channels) |d, ch| {
             const keep = @exp(-ch.evaporation * dt);
             const k = @min(ch.diffusion * dt, 0.9);
+            const kv: V = @splat(k);
+            const keepv: V = @splat(keep);
             for (0..rows) |y| {
-                for (0..cols) |x| {
+                if (y == 0 or y + 1 == rows or cols < 10) {
+                    for (0..cols) |x| {
+                        const i = y * cols + x;
+                        const v = d[i];
+                        const l = if (x > 0) d[i - 1] else v;
+                        const r = if (x + 1 < cols) d[i + 1] else v;
+                        const u = if (y > 0) d[i - cols] else v;
+                        const w = if (y + 1 < rows) d[i + cols] else v;
+                        f.scratch[i] = (v + k * ((l + r + u + w) * 0.25 - v)) * keep;
+                    }
+                    continue;
+                }
+                // Left border (x = 0)
+                {
+                    const i = y * cols;
+                    const v = d[i];
+                    f.scratch[i] = (v + k * ((v + d[i + 1] + d[i - cols] + d[i + cols]) * 0.25 - v)) * keep;
+                }
+                // SIMD interior (8 floats per iteration)
+                var x: usize = 1;
+                while (x + 8 <= cols - 1) : (x += 8) {
+                    const i = y * cols + x;
+                    const v: V = d[i..][0..8].*;
+                    const l: V = d[i - 1 ..][0..8].*;
+                    const r: V = d[i + 1 ..][0..8].*;
+                    const u: V = d[i - cols ..][0..8].*;
+                    const w: V = d[i + cols ..][0..8].*;
+                    f.scratch[i..][0..8].* = (v + kv * ((l + r + u + w) * qv - v)) * keepv;
+                }
+                // Scalar tail + right border
+                while (x < cols) : (x += 1) {
                     const i = y * cols + x;
                     const v = d[i];
-                    const l = if (x > 0) d[i - 1] else v;
                     const r = if (x + 1 < cols) d[i + 1] else v;
-                    const u = if (y > 0) d[i - cols] else v;
-                    const w = if (y + 1 < rows) d[i + cols] else v;
-                    f.scratch[i] = (v + k * ((l + r + u + w) * 0.25 - v)) * keep;
+                    f.scratch[i] = (v + k * ((d[i - 1] + r + d[i - cols] + d[i + cols]) * 0.25 - v)) * keep;
                 }
             }
             @memcpy(d, f.scratch);

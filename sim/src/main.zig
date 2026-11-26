@@ -62,12 +62,12 @@ pub fn main(init: std.process.Init) !void {
             logger.maybeLog(&world);
         }
         logger.logNow(&world);
-        std.debug.print("headless run complete: {d}s, seed {d}, max gen {d}, log: {s}\n", .{
-            secs, seed, world.max_generation, logger.path(),
+        std.debug.print("headless run complete: {d}s, seed {d}, max gen {d}, clades {d}/{d}, log: {s}\n", .{
+            secs, seed, world.max_generation, world.activeCladeCount(), world.clade_count, logger.path(),
         });
-        for (sim.societies, 0..) |s, si| {
+        for (0..world.clade_count) |si| {
             std.debug.print("  {s:<10} pop={d:<3} births={d:<4} starved={d:<4} killed={d:<3} max_gen={d}\n", .{
-                s.name, world.population(si), world.stats[si].births, world.stats[si].deaths[0], world.stats[si].deaths[2], world.stats[si].max_gen,
+                world.clades[si].name(), world.population(si), world.stats[si].births, world.stats[si].deaths[0], world.stats[si].deaths[2], world.stats[si].max_gen,
             });
         }
         return;
