@@ -549,13 +549,13 @@ fn drawWorld(app: *App) void {
 
     for (w.signals[0..w.signal_count]) |sig| {
         const t = std.math.clamp(sig.age / sim.signal_duration, 0, 1);
-        const alpha: u8 = @intFromFloat((1 - t) * 145);
-        const col: rl.Color = switch (sig.kind) {
+        const alpha: u8 = @intFromFloat((1 - t) * (110 + 65 * sig.volume));
+        const col: rl.Color = if (sig.kind) |k| switch (k) {
             .food_found => rgb(135, 240, 155),
             .danger_call => rgb(255, 85, 80),
             .storm_rally => rgb(140, 200, 255),
             .mate_call => rgb(245, 130, 230),
-        };
+        } else vocalColor(sig.vec);
         const r = 10 + sig.radius * 0.45 * t;
         rl.DrawCircleLinesV(v2(sig.pos), r, withAlpha(col, alpha));
         if (t > 0.15) rl.DrawCircleLinesV(v2(sig.pos), r * 0.72, withAlpha(col, alpha / 2));
@@ -1342,7 +1342,7 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
     const px = (sw - pw) * 0.5;
     if (px < 322) return;
     const py: f32 = 52;
-    const ph: f32 = 382;
+    const ph: f32 = 424;
     panel(px, py, pw, ph);
 
     var y = py + 12;
@@ -1423,6 +1423,18 @@ fn drawGenerationsPanel(app: *App, sw: f32) void {
             rec.trait_eff_sum / b,
         });
         y += 15;
+    }
+
+    // 4. Emergent Dialects (3-channel vocal vectors mapped to RGB swatches + food-vs-threat separation)
+    y += 6;
+    text(px + 14, y, 11, rgb(205, 215, 235), "Emergent dialects (divergence {d:.2})", .{w.dialectDivergence()});
+    y += 16;
+    for (sim.societies, 0..) |s, si| {
+        const st = w.stats[si];
+        const dx = px + 14 + @as(f32, @floatFromInt(si)) * 146;
+        rl.DrawCircleV(.{ .x = dx + 6, .y = y + 5 }, 4.5, vocalColor(st.vocal_mean));
+        text(dx + 15, y, 10, societyColor(s), "{s}", .{s.name});
+        text(dx + 72, y, 10, rgb(165, 175, 195), "sep {d:.2}", .{st.vocalContextSep()});
     }
 }
 
@@ -1733,9 +1745,15 @@ fn drawInspector(app: *App, e: *const sim.Entity) !void {
             cog.dopamine, cog.noradrenaline, cog.serotonin, e.activeMemories(), e.bondCount(),
         });
         y += 12;
-        text(x + 12, y, 10, rgb(185, 165, 225), "Hebb A {d:.2} lr {d:.3}  t {d:.2} s {d:.2} m {d:.2} c {d:.2}", .{
+        text(x + 12, y, 10, rgb(185, 165, 225), "Hebb A {d:.2} lr {d:.3}  t {d:.2} s {d:.2} m {d:.2} v {d:.2}", .{
             cog.hebb_a, cog.hebb_lr, cog.turn_out, cog.speed_out, cog.mod_out, cog.call_out,
         });
+        // Live acoustic voice swatch (left dot) and heard vocalization swatch (right dot if hearing sound).
+        rl.DrawCircleV(.{ .x = x + 272, .y = y + 5 }, 4.0, vocalColor(cog.call_f));
+        if (e.heard_timer > 0 and e.heard_vol > 0.05) {
+            rl.DrawCircleV(.{ .x = x + 283, .y = y + 5 }, 4.0, vocalColor(e.heard_vec));
+            rl.DrawCircleLinesV(.{ .x = x + 283, .y = y + 5 }, 5.0, rgb(235, 240, 250));
+        }
         y += 13;
         drawCognitiveGraph(cog, x + 12, y, 276, 46);
         y += 50;
@@ -1818,7 +1836,10 @@ fn drawCognitiveGraph(cog: *const gen.CognitiveBrain, x: f32, y: f32, w: f32, h:
             0 => rgb(255, 215, 90), // turn_out
             1 => rgb(95, 235, 255), // speed_out
             2 => rgb(235, 115, 255), // mod_out (evolved neuromodulator)
-            else => rgb(115, 245, 175), // call_out (neural vocalization)
+            3 => rgb(115, 245, 175), // call_out (volume/drive)
+            4 => rgb(255, 110, 110), // call_f0
+            5 => rgb(110, 245, 145), // call_f1
+            else => rgb(110, 175, 255), // call_f2
         };
         rl.DrawCircleV(pos[idx], 3.0, withAlpha(col, 110 + @as(u8, @intFromFloat(a * 145))));
     }
@@ -1832,6 +1853,14 @@ fn v2(p: sim.Vec2) rl.Vector2 {
 
 fn societyColor(s: sim.Society) rl.Color {
     return rgb(s.color[0], s.color[1], s.color[2]);
+}
+
+/// Map a 3-channel arbitrary vocal token in [-1, +1]^3 to a vivid RGB acoustic color.
+fn vocalColor(vec: [3]f32) rl.Color {
+    const r: u8 = @intFromFloat(std.math.clamp((vec[0] * 0.5 + 0.5) * 180 + 75, 75, 255));
+    const g: u8 = @intFromFloat(std.math.clamp((vec[1] * 0.5 + 0.5) * 180 + 75, 75, 255));
+    const b: u8 = @intFromFloat(std.math.clamp((vec[2] * 0.5 + 0.5) * 180 + 75, 75, 255));
+    return rgb(r, g, b);
 }
 
 fn foodColor(t: sim.FoodType) rl.Color {

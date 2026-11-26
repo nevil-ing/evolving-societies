@@ -84,7 +84,13 @@ def main():
             f"huddling calm={calm_hud*100:.0f}% vs storm={storm_hud*100:.0f}%"
         )
         if "signals_sent" in end:
-            print(f"  Communication: signals_sent={end['signals_sent']} | kin_responses={end['signals_acted']}")
+            voc_str = ""
+            if "vocal_f0" in last:
+                voc_str = (
+                    f" | dialect=({f(last, 'vocal_f0'):+.2f},{f(last, 'vocal_f1'):+.2f},{f(last, 'vocal_f2'):+.2f})"
+                    f" | context_sep={f(last, 'vocal_sep'):.2f}"
+                )
+            print(f"  Communication: signals_sent={end['signals_sent']} | kin_responses={end['signals_acted']}{voc_str}")
         if "structures_built" in end:
             pred_str = f" | predators_slain={end['predators_slain']} | raids_suffered={end['raids_suffered']}" if "predators_slain" in end else ""
             print(

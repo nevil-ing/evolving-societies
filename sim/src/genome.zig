@@ -28,19 +28,19 @@ pub const MotorGene = enum(u8) {
 pub const motor_count = @typeInfo(MotorGene).@"enum".field_names.len;
 
 /// Growing, recurrent cognitive network node layout:
-///   0 .. social_inputs-1                            : sensory, state, memory & egocentric directional inputs
+///   0 .. social_inputs-1                            : sensory, state, memory, acoustic ears & egocentric bearings
 ///   social_inputs .. social_inputs+max_cog_hidden-1 : evolvable leaky recurrent hidden neurons
 ///   out_base .. out_base+action_outputs-1           : 8 discrete action outputs
-///   out_base+8 .. out_base+11                       : 4 continuous cortical outputs (turn, speed, neuromodulator, vocal call)
-pub const social_inputs = 28;
+///   out_base+8 .. out_base+14                       : 7 continuous cortical outputs (turn, speed, mod, call_vol, call_f0..f2)
+pub const social_inputs = 31;
 pub const SocialAction = enum(u8) { forage, fight, mate, socialize, flee, gather, craft_tool, build };
 pub const action_outputs = @typeInfo(SocialAction).@"enum".field_names.len;
-pub const motor_outputs = 4; // turn_out, speed_out, mod_out, call_out
+pub const motor_outputs = 7; // turn_out, speed_out, mod_out, call_out (vol), call_f[0..3]
 pub const social_outputs = action_outputs + motor_outputs;
 pub const max_cog_hidden = 24;
 pub const out_base = social_inputs + max_cog_hidden;
 pub const max_cog_nodes = out_base + social_outputs;
-pub const max_cog_synapses = 320;
+pub const max_cog_synapses = 360;
 
 pub const Synapse = struct {
     from: u8,
@@ -75,7 +75,8 @@ pub const CognitiveBrain = struct {
     turn_out: f32 = 0, // -1..+1 direct continuous steering torque
     speed_out: f32 = 0, // -1..+1 direct continuous speed modulation
     mod_out: f32 = 0, // -1..+1 evolved internal neuromodulatory gate
-    call_out: f32 = 0, // -1..+1 neural vocalization/signal drive (> 0.45 broadcasts)
+    call_out: f32 = 0, // -1..+1 neural vocalization volume/drive (> 0.45 broadcasts)
+    call_f: [3]f32 = .{ 0, 0, 0 }, // -1..+1 arbitrary 3-channel acoustic vocal token (zero hardcoded meaning)
     /// Dynamic neuromodulators (runtime internal state).
     dopamine: f32 = 0.5, // reward surprise / motivation -> boosts plasticity
     noradrenaline: f32 = 0.2, // arousal / vigilance -> speeds thinking & adaptation
@@ -122,10 +123,14 @@ pub const CognitiveBrain = struct {
         b.bias[max_cog_hidden + @backingInt(SocialAction.gather)] += 0.15;
         b.bias[max_cog_hidden + @backingInt(SocialAction.craft_tool)] += 0.10;
         b.bias[max_cog_hidden + @backingInt(SocialAction.build)] += 0.10;
-        // Keep initial cortical turn/speed biases near zero so Gen 1 founders inherit clean FlyWire steering.
+        // Keep initial cortical turn/speed biases near zero so Gen 1 founders inherit clean FlyWire steering,
+        // quiet initial vocalization threshold, and diverse starter voice timbres across [-0.8, +0.8]^3.
         b.bias[max_cog_hidden + action_outputs + 0] = 0;
         b.bias[max_cog_hidden + action_outputs + 1] = 0;
-        b.bias[max_cog_hidden + action_outputs + 3] = -0.2;
+        b.bias[max_cog_hidden + action_outputs + 3] = -0.50;
+        for (0..3) |fi| {
+            b.bias[max_cog_hidden + action_outputs + 4 + fi] = (rng.float(f32) * 2.0 - 1.0) * 0.85;
+        }
 
         // Compact starter wiring: sparse input -> hidden, hidden -> output, and 2 starter recurrent memory loops.
         for (0..b.hidden_count) |hi| {
@@ -141,17 +146,28 @@ pub const CognitiveBrain = struct {
                 _ = b.insertSynapse(h_node, o_node, rng.floatNorm(f32) * scale);
             }
         }
-        // Seed sparse random zero-mean direct sensorimotor synapses (no hardcoded sign!) so
-        // 3-factor ABCD Hebbian plasticity & evolution can rapidly tune steering, speed, and calling.
+        // Seed sparse random zero-mean direct sensorimotor & acoustic synapses (no hardcoded sign or meaning!)
+        // so 3-factor ABCD Hebbian plasticity & evolution can rapidly tune steering, speed, and dialects.
         const turn_node: u8 = @intCast(out_base + action_outputs + 0);
         const speed_node: u8 = @intCast(out_base + action_outputs + 1);
         const call_node: u8 = @intCast(out_base + action_outputs + 3);
-        for (20..social_inputs) |ii| {
-            _ = b.insertSynapse(@intCast(ii), turn_node, rng.floatNorm(f32) * 0.10);
+        for ([_]u8{ 20, 21, 22, 23, 24, 25, 30 }) |ii| {
+            _ = b.insertSynapse(ii, turn_node, rng.floatNorm(f32) * 0.10);
         }
         for ([_]u8{ 0, 3, 8, 15, 18, 26 }) |ii| {
             _ = b.insertSynapse(ii, speed_node, rng.floatNorm(f32) * 0.10);
             _ = b.insertSynapse(ii, call_node, rng.floatNorm(f32) * 0.12);
+        }
+        // Context -> 3 vocal formants & heard formants -> motor outputs (purely random zero-mean starter wiring).
+        for (0..3) |fi| {
+            const vf_node: u8 = @intCast(out_base + action_outputs + 4 + fi);
+            for ([_]u8{ 0, 3, 8, 10, 15, 18 }) |ii| {
+                _ = b.insertSynapse(ii, vf_node, rng.floatNorm(f32) * 0.18);
+            }
+            const ear_node: u8 = @intCast(27 + fi);
+            _ = b.insertSynapse(ear_node, turn_node, rng.floatNorm(f32) * 0.08);
+            _ = b.insertSynapse(ear_node, speed_node, rng.floatNorm(f32) * 0.08);
+            _ = b.insertSynapse(ear_node, call_node, rng.floatNorm(f32) * 0.10);
         }
         // Seed initial recurrent working-memory loops between hidden neurons.
         for (0..2) |_| {
@@ -290,7 +306,7 @@ pub const CognitiveBrain = struct {
 
     /// Recurrent leaky forward pass (deterministic, zero exploratory noise).
     pub fn decide(b: *CognitiveBrain, in: [social_inputs]f32) SocialAction {
-        return b.decideExplore(in, .{ 0, 0, 0, 0 });
+        return b.decideExplore(in, @splat(0));
     }
 
     /// Recurrent leaky forward pass with LMAN-style exploratory motor babbling and
@@ -360,6 +376,9 @@ pub const CognitiveBrain = struct {
                     1 => b.speed_out = val,
                     2 => b.mod_out = val,
                     3 => b.call_out = val,
+                    4 => b.call_f[0] = val,
+                    5 => b.call_f[1] = val,
+                    6 => b.call_f[2] = val,
                     else => {},
                 }
             }
@@ -414,6 +433,22 @@ pub const CognitiveBrain = struct {
             s.weight = std.math.clamp(s.weight + delta, -4, 4);
         }
         b.dopamine = std.math.clamp(b.dopamine + 0.18 * (std.math.clamp(0.5 + 0.45 * td, 0.05, 1.0) - b.dopamine), 0.05, 1.0);
+    }
+
+    /// Cultural vocal learning: gently pulls a young learner's vocal formants toward a heard elder/kin token
+    /// without hardcoding any symbol meaning, enabling regional dialects to transmit across generations.
+    pub fn imitateVocal(b: *CognitiveBrain, target_f: [3]f32, rate: f32) void {
+        for (0..3) |fi| {
+            const bi = max_cog_hidden + action_outputs + 4 + fi;
+            const err = target_f[fi] - b.call_f[fi];
+            b.bias[bi] = std.math.clamp(b.bias[bi] + rate * err, -3, 3);
+            const node: u8 = @intCast(out_base + action_outputs + 4 + fi);
+            for (b.synapses[0..b.synapse_count]) |*s| {
+                if (s.active and s.to == node) {
+                    s.weight = std.math.clamp(s.weight + rate * 0.35 * err * b.act[s.from], -4, 4);
+                }
+            }
+        }
     }
 
     /// Experience-driven developmental rewiring: sprouts synapses and occasionally new neurons in life!

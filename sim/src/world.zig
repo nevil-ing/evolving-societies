@@ -284,12 +284,14 @@ pub const SignalKind = enum(u8) { food_found, danger_call, storm_rally, mate_cal
 pub const Signal = struct {
     pos: Vec2,
     target: Vec2,
-    kind: SignalKind,
+    kind: ?SignalKind = null, // null in Pure Neural emergent-language mode
+    vec: [3]f32 = .{ 0, 0, 0 }, // arbitrary 3-channel acoustic token in [-1, +1]
+    volume: f32 = 0.7,
     society: u8,
     radius: f32,
     age: f32 = 0,
 };
-pub const signal_duration: f32 = 0.9;
+pub const signal_duration: f32 = 1.05;
 
 pub const Entity = struct {
     id: u32,
@@ -337,9 +339,12 @@ pub const Entity = struct {
     distance_traveled: f32 = 0,
     call_cooldown: f32 = 0,
     heard_kind: ?SignalKind = null,
+    heard_vec: [3]f32 = .{ 0, 0, 0 },
+    heard_vol: f32 = 0,
     heard_pos: Vec2 = .{ .x = 0, .y = 0 },
     heard_timer: f32 = 0,
     last_sent: ?SignalKind = null,
+    last_vocal: [3]f32 = .{ 0, 0, 0 },
     carrying: CarryItem = .none,
     tool: ToolKind = .none,
     tool_durability: f32 = 0,
@@ -538,6 +543,20 @@ pub const SocietyStats = struct {
     raids_suffered: u32 = 0,
     discovered_tools: bool = false,
     discovered_building: bool = false,
+    /// Emergent language & dialect telemetry (observation only, never fed back as scripted rules).
+    vocal_mean: [3]f32 = .{ 0, 0, 0 },
+    vocal_food: [3]f32 = .{ 0, 0, 0 },
+    vocal_threat: [3]f32 = .{ 0, 0, 0 },
+    vocal_food_n: u32 = 0,
+    vocal_threat_n: u32 = 0,
+
+    pub fn vocalContextSep(st: SocietyStats) f32 {
+        if (st.vocal_food_n < 2 or st.vocal_threat_n < 2) return 0;
+        const d0 = st.vocal_food[0] - st.vocal_threat[0];
+        const d1 = st.vocal_food[1] - st.vocal_threat[1];
+        const d2 = st.vocal_food[2] - st.vocal_threat[2];
+        return @sqrt(d0 * d0 + d1 * d1 + d2 * d2);
+    }
 };
 
 pub const World = struct {
@@ -1184,7 +1203,13 @@ pub const World = struct {
                     target_e.remember(.danger, p.pos, 1.0);
                     target_e.genome.cog.learn(-dmg * 0.16);
                     target_e.genome.cog.noradrenaline = 1.0;
-                    if (target_e.call_cooldown <= 0) w.emitSignal(ti, .danger_call, p.pos);
+                    if (target_e.call_cooldown <= 0) {
+                        if (w.pure_neural) {
+                            if (target_e.genome.cog.call_out > 0.25) w.emitVocal(ti);
+                        } else {
+                            w.emitSignal(ti, .danger_call, p.pos);
+                        }
+                    }
                     w.field.deposit(alarmChannel(target_e.society), target_e.pos.x, target_e.pos.y, dmg * 0.9);
                     if (target_e.energy <= 0 and target_e.dead == null) {
                         p.kills += 1;
@@ -1714,20 +1739,28 @@ pub const World = struct {
                 0;
 
             const dir_home: f32 = egocentricBearing(e.heading, e.pos, home_rect.center());
-            const heard_cue: f32 = if (e.heard_kind) |hk| (if (hk == .danger_call) @as(f32, -1.0) else 1.0) else 0;
-            const dir_heard: f32 = if (e.heard_kind != null) egocentricBearing(e.heading, e.pos, e.heard_pos) else 0;
+            const heard_active = e.heard_timer > 0 and e.heard_vol > 0.01;
+            const heard_vol_in: f32 = if (heard_active) e.heard_vol else 0;
+            const heard_f0: f32 = if (heard_active) e.heard_vec[0] else 0;
+            const heard_f1: f32 = if (heard_active) e.heard_vec[1] else 0;
+            const heard_f2: f32 = if (heard_active) e.heard_vec[2] else 0;
+            const dir_heard: f32 = if (heard_active) egocentricBearing(e.heading, e.pos, e.heard_pos) else 0;
 
-            // Songbird LMAN-style exploratory motor babbling: stronger when hungry, threatened, or inexperienced,
-            // allowing zero-initialized cortical weights to discover steering/speed/calling online.
+            // Songbird LMAN-style exploratory motor & vocal babbling: stronger when hungry, threatened,
+            // or inexperienced, allowing zero-initialized cortical weights to discover steering and vocal tokens online.
             const motor_noise: [gen.motor_outputs]f32 = if (w.pure_neural) blk: {
                 const explore = std.math.clamp(0.14 + 0.30 * hunger_now + 0.16 * (1 - e.skill(.foraging)) + 0.14 * g.cog.noradrenaline, 0.10, 0.55);
+                const v_exp = explore * 0.35;
                 break :blk .{
                     w.rng().floatNorm(f32) * explore,
                     w.rng().floatNorm(f32) * explore * 0.65,
                     0,
                     w.rng().floatNorm(f32) * explore * 0.45,
+                    w.rng().floatNorm(f32) * v_exp,
+                    w.rng().floatNorm(f32) * v_exp,
+                    w.rng().floatNorm(f32) * v_exp,
                 };
-            } else .{ 0, 0, 0, 0 };
+            } else @splat(0);
 
             e.action = g.decideExplore(.{
                 e.energy / max_energy,
@@ -1756,7 +1789,10 @@ pub const World = struct {
                 dir_material,
                 dir_structure,
                 dir_home,
-                heard_cue,
+                heard_vol_in,
+                heard_f0,
+                heard_f1,
+                heard_f2,
                 dir_heard,
             }, motor_noise);
         }
@@ -1797,7 +1833,10 @@ pub const World = struct {
         e.call_cooldown = @max(0, e.call_cooldown - dt);
         if (e.heard_timer > 0) {
             e.heard_timer -= dt;
-            if (e.heard_timer <= 0) e.heard_kind = null;
+            if (e.heard_timer <= 0) {
+                e.heard_kind = null;
+                e.heard_vol = 0;
+            }
         }
 
         // Act on heard signals from kin (Assisted mode only; in Pure Neural mode heard_cue/dir_heard go straight into the brain!).
@@ -2091,28 +2130,20 @@ pub const World = struct {
                     e.genome.cog.learn(gained * 0.06);
                     if (!w.forage_only and r.amount > 6) e.remember(.food, r.pos, 0.75);
                     if (w.rng().float(f32) < bite * 0.006) _ = e.genome.cog.sproutFromExperience(w.rng());
-                    // Food Call: in Pure Neural mode, only broadcast if the brain fires call_out > 0.45!
-                    const want_food_call = if (w.pure_neural) g.cog.call_out > 0.45 else (g.trait(.sociability) > 0.35 or e.skill(.care) > 0.2);
-                    if (!w.forage_only and r.amount > 12 and e.call_cooldown <= 0 and want_food_call) {
+                    // Food Call (Assisted mode only; in Pure Neural mode, arbitrary 3-ch vocalization runs below).
+                    if (!w.forage_only and !w.pure_neural and r.amount > 12 and e.call_cooldown <= 0 and (g.trait(.sociability) > 0.35 or e.skill(.care) > 0.2)) {
                         w.emitSignal(i, .food_found, r.pos);
                     }
                 }
             }
         }
 
-        // Society vocalization: in Pure Neural mode, calls fire ONLY when the brain's call_out neuron exceeds 0.45!
+        // Emergent vocalization: in Pure Neural mode, whenever call_out > 0.55, broadcast the brain's raw
+        // 3-channel acoustic token (call_f[0..3]) with zero hardcoded meaning!
         if (!w.forage_only and e.call_cooldown <= 0) {
             if (w.pure_neural) {
-                if (g.cog.call_out > 0.45) {
-                    if (e.near_predator) |pi| {
-                        w.emitSignal(i, .danger_call, w.predators.items[pi].pos);
-                    } else if (e.enemy) |ei| {
-                        w.emitSignal(i, .danger_call, w.entities.items[ei].pos);
-                    } else if (w.phase == .storm) {
-                        w.emitSignal(i, .storm_rally, e.pos);
-                    } else if (e.readyToMate()) {
-                        w.emitSignal(i, .mate_call, e.pos);
-                    }
+                if (g.cog.call_out > 0.55 and e.energy > 22) {
+                    w.emitVocal(i);
                 }
             } else {
                 if (e.enemies_near >= 3 and e.enemy_dist < 48) {
@@ -2172,7 +2203,7 @@ pub const World = struct {
         const harsh = (if (home_rect.contains(e.pos)) soc.harshness else 0.3) * w.phase.harshness() * shelter_mult;
         const move_cost = 0.01 * (1 - 0.35 * e.skill(.navigation)) * @abs(speed);
         const carry_cost: f32 = if (e.carrying != .none) 0.12 else 0;
-        const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0003 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
+        const brain_cost = 0.004 * @as(f32, @floatFromInt(g.cog.hidden_count)) + 0.0002 * @as(f32, @floatFromInt(g.cog.activeSynapses()));
         const stage_drain: f32 = switch (lstage) {
             .infant => 0.65,
             .juvenile => 0.85,
@@ -2351,7 +2382,7 @@ pub const World = struct {
                             e.tool_durability -= 4.5 * dt;
                             if (e.tool_durability <= 0) e.tool = .none;
                         }
-                        if (e.call_cooldown <= 0) w.emitSignal(i, .danger_call, pd.pos);
+                        if (!w.pure_neural and e.call_cooldown <= 0) w.emitSignal(i, .danger_call, pd.pos);
                         if (pd.hp <= 0) {
                             e.kills += 1;
                             e.addSkill(.combat, 0.14);
@@ -2404,7 +2435,7 @@ pub const World = struct {
                         o.adjustTrust(e.id, -0.55 * dt);
                         o.genome.cog.noradrenaline = @min(1, o.genome.cog.noradrenaline + 0.5 * dt);
                     }
-                    if (!w.forage_only and o.call_cooldown <= 0) w.emitSignal(oi, .danger_call, e.pos);
+                    if (!w.forage_only and !w.pure_neural and o.call_cooldown <= 0) w.emitSignal(oi, .danger_call, e.pos);
                     w.field.deposit(alarmChannel(o.society), o.pos.x, o.pos.y, dmg * 0.6);
                     if (o.energy <= 0 and o.dead == null) {
                         const is_cannibal = o.society == e.society;
@@ -2766,7 +2797,105 @@ pub const World = struct {
         }
     }
 
-    /// Broadcast an acoustic/dance signal to nearby kin of the same society.
+    /// Average pairwise Euclidean distance between societies' mean vocal tokens (measures emergent dialect divergence).
+    pub fn dialectDivergence(w: *const World) f32 {
+        var sum: f32 = 0;
+        var pairs: f32 = 0;
+        for (0..society_count) |a| {
+            if (w.stats[a].signals_sent < 3) continue;
+            for (a + 1..society_count) |b| {
+                if (w.stats[b].signals_sent < 3) continue;
+                const d0 = w.stats[a].vocal_mean[0] - w.stats[b].vocal_mean[0];
+                const d1 = w.stats[a].vocal_mean[1] - w.stats[b].vocal_mean[1];
+                const d2 = w.stats[a].vocal_mean[2] - w.stats[b].vocal_mean[2];
+                sum += @sqrt(d0 * d0 + d1 * d1 + d2 * d2);
+                pairs += 1;
+            }
+        }
+        return if (pairs > 0) sum / pairs else 0;
+    }
+
+    /// Broadcast an unscripted 3-channel neural vocalization via the O(N) spatial grid.
+    /// Any creature within earshot (kin or rival eavesdropper) hears the raw acoustic formants and bearing.
+    fn emitVocal(w: *World, sender_idx: usize) void {
+        const sender = &w.entities.items[sender_idx];
+        const soc = sender.society;
+        const pos = sender.pos;
+        const vec = sender.genome.cog.call_f;
+        const vol = std.math.clamp(sender.genome.cog.call_out, 0.45, 1.0);
+        const radius = 175 + 115 * vol;
+        const sender_id = sender.id;
+        const sender_mature = sender.mature();
+
+        sender.call_cooldown = 5.0;
+        sender.last_sent = null;
+        sender.last_vocal = vec;
+        sender.energy = @max(1, sender.energy - 0.15);
+        sender.addSkill(.care, 0.003);
+
+        const st = &w.stats[soc];
+        st.signals_sent += 1;
+        const ema: f32 = if (st.signals_sent <= 1) 1.0 else 0.08;
+        for (0..3) |fi| st.vocal_mean[fi] += (vec[fi] - st.vocal_mean[fi]) * ema;
+        if (sender.near_predator != null or sender.enemy != null) {
+            st.vocal_threat_n += 1;
+            const ta: f32 = if (st.vocal_threat_n <= 1) 1.0 else 0.12;
+            for (0..3) |fi| st.vocal_threat[fi] += (vec[fi] - st.vocal_threat[fi]) * ta;
+        } else if (sender.feeding or sender.visible_food != null) {
+            st.vocal_food_n += 1;
+            const fa: f32 = if (st.vocal_food_n <= 1) 1.0 else 0.12;
+            for (0..3) |fi| st.vocal_food[fi] += (vec[fi] - st.vocal_food[fi]) * fa;
+        }
+
+        const sig = Signal{ .pos = pos, .target = pos, .kind = null, .vec = vec, .volume = vol, .society = soc, .radius = radius };
+        if (w.signal_count < w.signals.len) {
+            w.signals[w.signal_count] = sig;
+            w.signal_count += 1;
+        } else {
+            var oldest: usize = 0;
+            for (1..w.signals.len) |k| if (w.signals[k].age > w.signals[oldest].age) {
+                oldest = k;
+            };
+            w.signals[oldest] = sig;
+        }
+
+        const cc = cellCoords(pos);
+        const span: usize = 4; // 4 * 80u = 320u >= max radius 290u
+        const x0: usize = cc[0] -| span;
+        const x1: usize = @min(grid_cols - 1, cc[0] + span);
+        const y0: usize = cc[1] -| span;
+        const y1: usize = @min(grid_rows - 1, cc[1] + span);
+        for (y0..y1 + 1) |gy| {
+            for (x0..x1 + 1) |gx| {
+                var cur = w.grid_head[gy * grid_cols + gx];
+                while (cur >= 0) {
+                    const oi: usize = @intCast(cur);
+                    cur = w.grid_next.items[oi];
+                    const o = &w.entities.items[oi];
+                    if (o.dead != null or o.id == sender_id) continue;
+                    const d = o.pos.dist(pos);
+                    if (d > radius) continue;
+                    const loudness = vol * std.math.clamp(1.0 - d / radius, 0.08, 1.0);
+                    if (loudness >= o.heard_vol * 0.7 or o.heard_timer <= 0.5) {
+                        o.heard_kind = null;
+                        o.heard_vec = vec;
+                        o.heard_vol = loudness;
+                        o.heard_pos = pos;
+                        o.heard_timer = 5.0;
+                    }
+                    if (o.society == soc) {
+                        st.signals_acted += 1;
+                        // Cultural vocal learning: infants/juveniles gently tune toward nearby mature kin's dialect.
+                        if (!o.mature() and sender_mature and d < 160) {
+                            o.genome.cog.imitateVocal(vec, 0.035);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Broadcast a legacy semantic signal (Assisted mode).
     fn emitSignal(w: *World, sender_idx: usize, kind: SignalKind, target: Vec2) void {
         const sender = &w.entities.items[sender_idx];
         const soc = sender.society;
@@ -2775,13 +2904,20 @@ pub const World = struct {
             120 + 60 * sender.genome.trait(.sociability)
         else
             180 + 140 * sender.genome.trait(.sociability) + 100 * sender.skill(.care);
+        const vec: [3]f32 = switch (kind) {
+            .food_found => .{ -0.45, 0.85, -0.25 },
+            .danger_call => .{ 0.95, -0.75, -0.55 },
+            .storm_rally => .{ -0.35, 0.30, 0.95 },
+            .mate_call => .{ 0.85, -0.25, 0.80 },
+        };
         sender.call_cooldown = if (kind == .danger_call) 10.0 else 4.5;
         sender.last_sent = kind;
+        sender.last_vocal = vec;
         sender.energy = @max(1, sender.energy - 0.25);
         sender.addSkill(.care, 0.004);
         w.stats[soc].signals_sent += 1;
 
-        const sig = Signal{ .pos = pos, .target = target, .kind = kind, .society = soc, .radius = radius };
+        const sig = Signal{ .pos = pos, .target = target, .kind = kind, .vec = vec, .volume = 0.8, .society = soc, .radius = radius };
         if (w.signal_count < w.signals.len) {
             w.signals[w.signal_count] = sig;
             w.signal_count += 1;
@@ -2801,6 +2937,8 @@ pub const World = struct {
                 .food_found => {
                     if (o.energy < 95 and !o.feeding and o.action != .fight and o.action != .flee and o.heard_kind != .danger_call) {
                         o.heard_kind = .food_found;
+                        o.heard_vec = vec;
+                        o.heard_vol = 0.8;
                         o.heard_pos = target;
                         o.heard_timer = 10;
                         w.stats[soc].signals_acted += 1;
@@ -2809,6 +2947,8 @@ pub const World = struct {
                 .danger_call => {
                     if (o.energy >= 40) {
                         o.heard_kind = .danger_call;
+                        o.heard_vec = vec;
+                        o.heard_vol = 0.9;
                         o.heard_pos = target;
                         o.heard_timer = 3.5;
                         o.action_timer = 0;
@@ -2818,6 +2958,8 @@ pub const World = struct {
                 .storm_rally => {
                     if (w.phase == .storm and !o.huddled and o.energy > 45) {
                         o.heard_kind = .storm_rally;
+                        o.heard_vec = vec;
+                        o.heard_vol = 0.8;
                         o.heard_pos = target;
                         o.heard_timer = 8;
                         w.stats[soc].signals_acted += 1;
@@ -2826,6 +2968,8 @@ pub const World = struct {
                 .mate_call => {
                     if (o.readyToMate() and o.mate == null and o.heard_kind == null) {
                         o.heard_kind = .mate_call;
+                        o.heard_vec = vec;
+                        o.heard_vol = 0.75;
                         o.heard_pos = target;
                         o.heard_timer = 7;
                         w.stats[soc].signals_acted += 1;

@@ -306,10 +306,10 @@ test "cognitive brain: neurogenesis, synaptogenesis, and reward plasticity work"
     try std.testing.expectEqual(@as(u16, 1), brain.lifetime_rewires);
 
     // Run a decision then apply positive reward: weights, predictor, continuous outputs, and dopamine should adapt.
-    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0 });
+    _ = brain.decide(.{ 0.8, 0.5, 0.2, 0, 0, 0.4, 0.2, 0, 0.7, 1, 1, 0, 0, 0, 1, 0, 0.8, 0.2, 0, 0, 0.5, -0.3, 0.1, 0, 0, 0.2, 0, 0, 0, 0, 0 });
     try std.testing.expect(@abs(brain.call_out) <= 1.0);
     // Recurrent working memory: hidden activations persist on a zero-input follow-up step.
-    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+    _ = brain.decide(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
     var hidden_mag: f32 = 0;
     for (0..brain.hidden_count) |hi| hidden_mag += @abs(brain.act[gen.social_inputs + hi]);
     try std.testing.expect(hidden_mag > 1e-3);
@@ -887,4 +887,77 @@ test "world: blank-slate pure neural entity learns online to turn toward visible
     // turn around on its own with ZERO steerTo, reach the food, and eat!
     try std.testing.expect(w.entities.items[0].genome.cog.synapses[0].weight > 0.15);
     try std.testing.expect(w.entities.items[0].food_eaten > 1.0);
+}
+
+test "world: emergent language broadcasts 3-channel vocalizations, eavesdropping, and youth dialect learning" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w = try World.init(gpa, &c, 9091);
+    try std.testing.expect(w.pure_neural);
+    w.clearAllFood();
+    w.prey.clearRetainingCapacity();
+    w.predators.clearRetainingCapacity();
+    w.structures.clearRetainingCapacity();
+    while (w.entities.items.len > 3) {
+        const last = w.entities.pop().?;
+        last.genome.deinit(gpa);
+        last.brain.deinit(gpa);
+    }
+
+    // Entity 0: mature adult Circle caller emitting a specific arbitrary 3-ch vocal token (+0.9, -0.9, +0.9).
+    const caller = &w.entities.items[0];
+    caller.society = 1;
+    caller.age = sim.maturity_age + 50;
+    caller.energy = 110;
+    caller.pos = .{ .x = 0, .y = 0 };
+    caller.heading = 0;
+    caller.call_cooldown = 0;
+    caller.action_timer = 0.08; // let rebuildGrid() index moved test entities before broadcasting
+    caller.genome.cog.synapse_count = 0;
+    caller.genome.cog.bias = @splat(0);
+    caller.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 3] = 4.0; // loud call_out > 0.45
+    caller.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 4] = 3.0; // f0 -> +
+    caller.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 5] = -3.0; // f1 -> -
+    caller.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 6] = 3.0; // f2 -> +
+
+    // Entity 1: juvenile Circle kin nearby (should hear raw formants AND culturally imitate caller's voice).
+    const youth = &w.entities.items[1];
+    youth.society = 1;
+    youth.age = sim.infant_age + 20;
+    youth.energy = 100;
+    youth.pos = .{ .x = 80, .y = 0 };
+    youth.heading = std.math.pi * 0.5;
+    youth.genome.cog.synapse_count = 0;
+    youth.genome.cog.bias = @splat(0);
+    youth.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 3] = -4.0; // silent listener
+
+    // Entity 2: rival Square nearby (proves physical sound waves allow cross-society eavesdropping!).
+    const rival = &w.entities.items[2];
+    rival.society = 2;
+    rival.age = sim.maturity_age + 20;
+    rival.energy = 100;
+    rival.pos = .{ .x = -90, .y = 0 };
+    rival.heading = 0;
+    rival.genome.cog.synapse_count = 0;
+    rival.genome.cog.bias = @splat(0);
+    rival.genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 3] = -4.0; // silent listener
+
+    for (0..18) |_| try w.step(1.0 / 60.0);
+
+    try std.testing.expect(w.stats[1].signals_sent >= 1);
+    try std.testing.expect(w.signal_count >= 1);
+    // Unscripted emergent signal has NO hardcoded SignalKind!
+    try std.testing.expect(w.signals[0].kind == null);
+    try std.testing.expect(w.signals[0].vec[0] > 0.7 and w.signals[0].vec[1] < -0.7 and w.signals[0].vec[2] > 0.7);
+    // Both kin youth AND rival eavesdropper physically hear the raw 3-channel acoustic token.
+    try std.testing.expect(w.entities.items[1].heard_vol > 0.1);
+    try std.testing.expect(w.entities.items[1].heard_vec[0] > 0.7 and w.entities.items[1].heard_vec[1] < -0.7);
+    try std.testing.expect(w.entities.items[2].heard_vol > 0.1);
+    try std.testing.expect(w.entities.items[2].heard_vec[0] > 0.7);
+    // Youth's vocal formant biases shifted culturally toward the mature kin's token!
+    try std.testing.expect(w.entities.items[1].genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 4] > 0.01);
+    try std.testing.expect(w.entities.items[1].genome.cog.bias[gen.max_cog_hidden + gen.action_outputs + 5] < -0.01);
 }
