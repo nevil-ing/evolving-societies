@@ -6,6 +6,76 @@ const fly = @import("flybrain.zig");
 const gen = @import("genome.zig");
 const pher = @import("pheromone.zig");
 
+const CFILE = opaque {};
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*CFILE;
+extern "c" fn fwrite(ptr: [*]const u8, size: usize, nmemb: usize, stream: *CFILE) usize;
+extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: *CFILE) usize;
+extern "c" fn fclose(stream: *CFILE) c_int;
+
+fn writeExact(f: *CFILE, bytes: []const u8) !void {
+    if (bytes.len == 0) return;
+    if (fwrite(bytes.ptr, 1, bytes.len, f) != bytes.len) return error.SnapshotWriteFailed;
+}
+
+fn readExact(f: *CFILE, bytes: []u8) !void {
+    if (bytes.len == 0) return;
+    if (fread(bytes.ptr, 1, bytes.len, f) != bytes.len) return error.SnapshotReadFailed;
+}
+
+fn writePod(f: *CFILE, value: anytype) !void {
+    try writeExact(f, std.mem.asBytes(&value));
+}
+
+fn readPod(f: *CFILE, comptime T: type) !T {
+    var out: T = undefined;
+    try readExact(f, std.mem.asBytes(&out));
+    return out;
+}
+
+const snapshot_magic = [4]u8{ 'E', 'S', 'A', 'V' };
+const snapshot_version: u32 = 1;
+
+const SavedEntity = struct {
+    id: u32,
+    society: u8,
+    pos: Vec2,
+    heading: f32,
+    energy: f32,
+    fatigue: f32,
+    resting: bool,
+    age: f32,
+    lifespan: f32,
+    generation: u32,
+    lineage: u32,
+    parents: [2]u32,
+    children: u32,
+    hybrid: bool,
+    repro_cooldown: f32,
+    since_meal: f32,
+    food_eaten: f32,
+    kills: u32,
+    cannibal_kills: u32,
+    skills: [skill_count]f32,
+    traits: [gen.trait_count]f32,
+    motor: [gen.motor_count]f32,
+    digest: [3]f32,
+    kin_tag: [4]f32,
+    chem_sig: [3]f32,
+    body_scale: f32,
+    mhc: [8]u8,
+    cog: gen.CognitiveBrain,
+    carrying: CarryItem,
+    tool: ToolKind,
+    tool_durability: f32,
+    memories: [max_memories]Memory,
+    bonds: [max_bonds]SocialBond,
+    antibodies: [max_antibodies]Antibody,
+    infection: ?Infection,
+    herb_boost: f32,
+    last_vocal: [3]f32,
+    distance_traveled: f32,
+};
+
 pub const Vec2 = struct {
     x: f32,
     y: f32,
@@ -901,6 +971,242 @@ pub const World = struct {
         w.signal_count = 0;
         w.trade_arc_count = 0;
         try w.populate();
+    }
+
+    /// Save the complete live simulation state to a compact binary `.esav` snapshot file.
+    pub fn saveSnapshot(w: *const World, path: [:0]const u8) !void {
+        const f = fopen(path.ptr, "wb") orelse return error.SnapshotOpenFailed;
+        defer _ = fclose(f);
+
+        try writeExact(f, &snapshot_magic);
+        try writePod(f, snapshot_version);
+        try writePod(f, @as(u32, @intCast(w.circuit.types)));
+        try writePod(f, @as(u32, @intCast(w.circuit.neurons)));
+        try writePod(f, @as(u32, @intCast(w.field.cols)));
+        try writePod(f, @as(u32, @intCast(w.field.rows)));
+        try writePod(f, @as(u32, @intCast(channel_count)));
+
+        try writePod(f, w.prng);
+        try writePod(f, w.time);
+        try writePod(f, w.next_id);
+        try writePod(f, w.max_generation);
+        try writePod(f, w.scarcity);
+        try writePod(f, w.phase);
+        try writePod(f, w.phase_offset);
+        try writePod(f, w.pure_neural);
+        try writePod(f, @as(u32, @intCast(w.clade_count)));
+        try writePod(f, @as(u32, @intCast(w.history_count)));
+        try writePod(f, @as(u32, @intCast(w.event_count)));
+        try writePod(f, @as(u32, @intCast(w.gen_record_count)));
+        try writePod(f, w.next_strain_id);
+
+        try writePod(f, w.clades);
+        try writePod(f, w.stats);
+        try writePod(f, w.territories);
+        try writePod(f, w.soil_nutrients);
+        try writePod(f, w.soil_moisture);
+        try writePod(f, w.waste);
+        for (w.history[0..w.history_count]) |row| try writePod(f, row);
+        for (w.events[0..w.event_count]) |ev| try writePod(f, ev);
+        for (w.gen_records[0..w.gen_record_count]) |gr| try writePod(f, gr);
+
+        // Chemical field channels.
+        for (0..channel_count) |ch| {
+            try writeExact(f, std.mem.sliceAsBytes(w.field.data[ch]));
+        }
+
+        // Dynamic world lists.
+        try writePod(f, @as(u32, @intCast(w.resources.items.len)));
+        for (w.resources.items) |r| try writePod(f, r);
+        try writePod(f, @as(u32, @intCast(w.materials.items.len)));
+        for (w.materials.items) |m| try writePod(f, m);
+        try writePod(f, @as(u32, @intCast(w.structures.items.len)));
+        for (w.structures.items) |st| try writePod(f, st);
+        try writePod(f, @as(u32, @intCast(w.prey.items.len)));
+        for (w.prey.items) |pr| try writePod(f, pr);
+        try writePod(f, @as(u32, @intCast(w.predators.items.len)));
+        for (w.predators.items) |pd| try writePod(f, pd);
+
+        // Live entities + fly gains + brainstem voltage/rate state.
+        var alive_n: u32 = 0;
+        for (w.entities.items) |e| if (e.dead == null) {
+            alive_n += 1;
+        };
+        try writePod(f, alive_n);
+        for (w.entities.items) |e| {
+            if (e.dead != null) continue;
+            const se = SavedEntity{
+                .id = e.id,
+                .society = e.society,
+                .pos = e.pos,
+                .heading = e.heading,
+                .energy = e.energy,
+                .fatigue = e.fatigue,
+                .resting = e.resting,
+                .age = e.age,
+                .lifespan = e.lifespan,
+                .generation = e.generation,
+                .lineage = e.lineage,
+                .parents = e.parents,
+                .children = e.children,
+                .hybrid = e.hybrid,
+                .repro_cooldown = e.repro_cooldown,
+                .since_meal = e.since_meal,
+                .food_eaten = e.food_eaten,
+                .kills = e.kills,
+                .cannibal_kills = e.cannibal_kills,
+                .skills = e.skills,
+                .traits = e.genome.traits,
+                .motor = e.genome.motor,
+                .digest = e.genome.digest,
+                .kin_tag = e.genome.kin_tag,
+                .chem_sig = e.genome.chem_sig,
+                .body_scale = e.genome.body_scale,
+                .mhc = e.genome.mhc,
+                .cog = e.genome.cog,
+                .carrying = e.carrying,
+                .tool = e.tool,
+                .tool_durability = e.tool_durability,
+                .memories = e.memories,
+                .bonds = e.bonds,
+                .antibodies = e.antibodies,
+                .infection = e.infection,
+                .herb_boost = e.herb_boost,
+                .last_vocal = e.last_vocal,
+                .distance_traveled = e.distance_traveled,
+            };
+            try writePod(f, se);
+            try writeExact(f, std.mem.sliceAsBytes(e.genome.fly_gain));
+            try writeExact(f, std.mem.sliceAsBytes(e.brain.v));
+            try writeExact(f, std.mem.sliceAsBytes(e.brain.r));
+        }
+    }
+
+    /// Restore a binary `.esav` snapshot into this World (deep-time headless -> GUI continuity!).
+    pub fn loadSnapshot(w: *World, path: [:0]const u8) !void {
+        const f = fopen(path.ptr, "rb") orelse return error.SnapshotOpenFailed;
+        defer _ = fclose(f);
+
+        var magic: [4]u8 = undefined;
+        try readExact(f, &magic);
+        if (!std.mem.eql(u8, &magic, &snapshot_magic)) return error.InvalidSnapshot;
+        const ver = try readPod(f, u32);
+        if (ver != snapshot_version) return error.InvalidSnapshot;
+        const types = try readPod(f, u32);
+        const neurons = try readPod(f, u32);
+        const fcols = try readPod(f, u32);
+        const frows = try readPod(f, u32);
+        const chs = try readPod(f, u32);
+        if (types != w.circuit.types or neurons != w.circuit.neurons or fcols != w.field.cols or frows != w.field.rows or chs != channel_count) {
+            return error.IncompatibleSnapshot;
+        }
+
+        // Clear existing world entities and lists cleanly.
+        for (w.entities.items) |e| free(w.gpa, e);
+        w.entities.clearRetainingCapacity();
+        w.resources.clearRetainingCapacity();
+        w.patches.clearRetainingCapacity();
+        w.materials.clearRetainingCapacity();
+        w.structures.clearRetainingCapacity();
+        w.prey.clearRetainingCapacity();
+        w.predators.clearRetainingCapacity();
+        w.contact_count = 0;
+        w.signal_count = 0;
+        w.trade_arc_count = 0;
+
+        w.prng = try readPod(f, std.Random.DefaultPrng);
+        w.time = try readPod(f, f32);
+        w.next_id = try readPod(f, u32);
+        w.max_generation = try readPod(f, u32);
+        w.scarcity = try readPod(f, Scarcity);
+        w.phase = try readPod(f, WorldPhase);
+        w.phase_offset = try readPod(f, f32);
+        w.pure_neural = try readPod(f, bool);
+        w.clade_count = @min(max_societies, try readPod(f, u32));
+        w.history_count = @min(history_len, try readPod(f, u32));
+        w.event_count = @min(max_events, try readPod(f, u32));
+        w.gen_record_count = @min(max_gen_records, try readPod(f, u32));
+        w.next_strain_id = try readPod(f, u32);
+
+        w.clades = try readPod(f, [max_societies]Clade);
+        w.stats = try readPod(f, [max_societies]SocietyStats);
+        w.territories = try readPod(f, [max_societies]Rect);
+        w.soil_nutrients = try readPod(f, [grid_cells]f32);
+        w.soil_moisture = try readPod(f, [grid_cells]f32);
+        w.waste = try readPod(f, [grid_cells]f32);
+        for (0..w.history_count) |hi| w.history[hi] = try readPod(f, [max_societies]u16);
+        for (0..w.event_count) |ei| w.events[ei] = try readPod(f, WorldEvent);
+        for (0..w.gen_record_count) |gi| w.gen_records[gi] = try readPod(f, GenRecord);
+
+        for (0..channel_count) |ch| {
+            try readExact(f, std.mem.sliceAsBytes(w.field.data[ch]));
+        }
+
+        const res_n = try readPod(f, u32);
+        for (0..res_n) |_| try w.resources.append(w.gpa, try readPod(f, Resource));
+        const mat_n = try readPod(f, u32);
+        for (0..mat_n) |_| try w.materials.append(w.gpa, try readPod(f, Material));
+        const st_n = try readPod(f, u32);
+        for (0..st_n) |_| try w.structures.append(w.gpa, try readPod(f, Structure));
+        const pr_n = try readPod(f, u32);
+        for (0..pr_n) |_| try w.prey.append(w.gpa, try readPod(f, Prey));
+        const pd_n = try readPod(f, u32);
+        for (0..pd_n) |_| try w.predators.append(w.gpa, try readPod(f, Predator));
+
+        const ent_n = try readPod(f, u32);
+        for (0..ent_n) |_| {
+            const se = try readPod(f, SavedEntity);
+            const fly_gain = try w.gpa.alloc(f32, w.circuit.types);
+            try readExact(f, std.mem.sliceAsBytes(fly_gain));
+            const brain = try fly.State.init(w.gpa, w.circuit);
+            try readExact(f, std.mem.sliceAsBytes(brain.v));
+            try readExact(f, std.mem.sliceAsBytes(brain.r));
+            try w.entities.append(w.gpa, .{
+                .id = se.id,
+                .society = se.society,
+                .pos = se.pos,
+                .heading = se.heading,
+                .energy = se.energy,
+                .fatigue = se.fatigue,
+                .resting = se.resting,
+                .age = se.age,
+                .lifespan = se.lifespan,
+                .generation = se.generation,
+                .lineage = se.lineage,
+                .parents = se.parents,
+                .children = se.children,
+                .hybrid = se.hybrid,
+                .repro_cooldown = se.repro_cooldown,
+                .since_meal = se.since_meal,
+                .food_eaten = se.food_eaten,
+                .kills = se.kills,
+                .cannibal_kills = se.cannibal_kills,
+                .skills = se.skills,
+                .genome = .{
+                    .traits = se.traits,
+                    .motor = se.motor,
+                    .digest = se.digest,
+                    .kin_tag = se.kin_tag,
+                    .chem_sig = se.chem_sig,
+                    .body_scale = se.body_scale,
+                    .mhc = se.mhc,
+                    .cog = se.cog,
+                    .fly_gain = fly_gain,
+                },
+                .brain = brain,
+                .carrying = se.carrying,
+                .tool = se.tool,
+                .tool_durability = se.tool_durability,
+                .memories = se.memories,
+                .bonds = se.bonds,
+                .antibodies = se.antibodies,
+                .infection = se.infection,
+                .herb_boost = se.herb_boost,
+                .last_vocal = se.last_vocal,
+                .distance_traveled = se.distance_traveled,
+            });
+        }
+        try w.rebuildGrid();
     }
 
     fn rng(w: *World) std.Random {

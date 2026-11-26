@@ -1,6 +1,6 @@
 # Evolving Societies
 
-A native, real-time artificial-life sandbox where three societies — **Triangles**, **Circles**, and **Squares** — live, learn, build, hunt, and evolve across generations in a living 2D world.
+A native, real-time artificial-life sandbox where societies — starting as **Triangles**, **Circles**, and **Squares** and capable of speciating into **up to 16 distinct clades** — live, learn, speak, trade, fight disease, build settlements, and evolve across generations in a closed-loop 2D miniverse.
 
 Built in Zig with raylib as a fast, standalone desktop app with zero external runtime dependencies.
 
@@ -8,19 +8,20 @@ Built in Zig with raylib as a fast, standalone desktop app with zero external ru
 
 ## What It's About
 
-Instead of scripting fixed rules for every behavior, *Evolving Societies* gives creatures senses, chemical fields, physical needs, and plastic neural networks — then lets survival, learning, and natural selection shape what happens next.
+Instead of scripting fixed rules for every behavior, *Evolving Societies* gives creatures senses, chemical fields, biological immunity, physical needs, and plastic neural networks — then lets survival, learning, and natural selection shape what happens next.
 
-You can sit back and watch lineages adapt over hours, click any individual to inspect its brain and memories live, or step in as an experimenter to trigger storms, famine, predators, or genetic mutations.
+You can sit back with the **Auto-Director (`V`)** documentary camera and watch lineages adapt over hours, click any individual to inspect its mind, diet, antibodies, and memories live, run deep-time headless evolutions saved to `.esav` snapshots, or step in as an experimenter to trigger storms, outbreaks, famine, predators, or seed new tribes.
 
 ## Key Features
 
-- **Pure Neural Mode & Live Online Learning:** Every individual runs a growing, recurrent neural network with continuous motor outputs (`turn`, `speed`, `neuromodulator`, `vocal call`). Through exploratory motor babbling and dopamine-modulated Hebbian plasticity, individuals adapt *during* their lifetime while evolution grows new neurons, synapses, and recurrent memory loops across generations. Runs in **Pure Neural** mode by default (zero steering autopilot), with a live **Assisted** toggle in Experiment Controls (`E`) to compare both side by side.
-- **Episodic Mental Maps & Social Bonds:** Creatures remember up to 6 spatial landmarks (food patches, quarries, shelters, prey, danger zones), clear stale beliefs when a remembered spot runs empty, share memories with kin on contact, and form social trust bonds.
-- **Emergent Tools & Stigmergic Building:** Renewable **Wood** and **Stone** deposits let societies organically discover **Baskets** (foraging boost), **Spears** (hunting & defense), **Shelters** (storm refuge and physical walls against predators), and **Food Caches** (communal stores — and raid targets for rival societies).
-- **Living Ecosystem, Wildlife & Weather:** Dynamic 5-minute **Calm → Bloom → Storm** weather cycles, diffusing food scents, society trails, and alarm pheromones, roaming **Wild Prey**, hunting **Apex Predators**, cross-society cache raiding, and emergent starvation cannibalism under extreme famine.
-- **Developmental Life Stages & Culture:** Realistic 1–2 hour simulated lifespans progress through **Infant → Juvenile → Adult → Elder** with childhood learning windows, elder mentoring, communal childcare, inherited skills, and emergent colony roles (`forager`, `scout`, `guard`, `caretaker`, `builder`, `hunter`, `elder`).
-- **Specimen Lab (`T`) & Experiment Controls (`E`):** Capture any creature to compare generations side-by-side, tweak traits/skills, mutate brains, and release clone batches (`x1`–`x50`). Use Experiment Controls to flood or clear food, jump weather phases, spawn prey or apex predators, or toggle Pure Neural vs. Assisted mode live.
-- **Uncapped Populations & Automatic Telemetry:** An $O(N)$ spatial hash grid keeps large civilizations running smoothly, while every run automatically logs CSV telemetry that can be summarized with `tools/analyze_run.py`.
+- **Pure Neural Mode & Live Online Learning:** Every individual runs a growing, double-buffered leaky-recurrent neural network (36 inputs, 9 discrete actions + 7 continuous motor/vocal outputs) with NEAT innovation-aligned crossover and multi-layer neurogenesis. Through exploratory motor babbling, temporal-difference bootstrapping, and dopamine-modulated ABCD Hebbian plasticity, individuals adapt *during* their lifetime while evolution grows new circuits across generations. Runs in **Pure Neural** mode by default (zero steering autopilot), with a live **Assisted** toggle in Experiment Controls (`E`).
+- **Closed-Loop Biogeochemical Miniverse:** Rather than spawning food from arbitrary timers, biomass cycles like a miniature Earth: **soil nutrients** and **soil moisture** drive living **plant photosynthesis** and organic seed spread, storms recharge moisture and weather **stone outcrops** into **mineral** crystals, living metabolism returns diffusing organic **waste** (driving crowding stress & migrations before decomposing microbially back into rich soil), **Wild Prey** graze plants and reproduce calves, and every **corpse** either feeds scavengers or rots directly back into fertile loam.
+- **Unlimited Dynamic Speciation & Honest Morphology:** Starting from 3 founder societies, lineages can evolve their own **digestive specialization** (meat/plant/mineral simplex), **Wyatt 4-channel chemical signatures**, and **Kleiber-scaled body sizes** across 6 physical body shapes (`triangle`, `circle`, `square`, `diamond`, `pentagon`, `hexagon`) with real speed, agility, energy-capacity, and storm-insulation trade-offs. Diverged lineages bud new clades automatically (up to 16) with reproductive isolation, or you can drop fresh tribes live with **`Seed New Tribe (+10)`**.
+- **Emergent Language & Evolving Dialects:** Pure Neural vocalizations use an unscripted 3-channel continuous acoustic space (`call_out` volume + 3 formants rendered as RGB speech ripples) with directional hearing, cross-society eavesdropping, and joint-attention-gated youth imitation — allowing distinct regional dialects and context-specific calls to diverge organically.
+- **Individual Immune System, Pathogens & Medicinal Herbs:** Every creature carries polymorphic 8-locus innate **MHC genes** and 4 cross-reactive **adaptive antibody** slots, passing 40% passive immunity to newborns. Mutating pathogens emerge from unsanitary overcrowding and spread faster inside shelters (`2.2×`), creating a real evolutionary trade-off against storm warmth and predator safety. Rare frontier **Medicinal Herbs** trigger sick-state self-medication, boosting antibody synthesis `3.2×`.
+- **Emergent Gift & Barter Economy:** An unscripted `offer` action lets creatures hand portable **food packs**, **medicinal herbs**, **wood**, **stone**, or surplus energy to kin or neighboring clades under Axelrod/Riolo reciprocity payoffs ($c/b \le 0.30$), tracked via social trust bonds, direct-reciprocity defection penalties, and glowing gold-cyan transfer arcs.
+- **Episodic Mental Maps, Culture, Tools & Ruins:** Creatures remember up to 6 spatial landmarks, clear stale beliefs on empty arrival, share memories on contact, and pass down skills and multi-step crafts (**Baskets**, **Spears**, **Shelters**, **Food Caches**) through juvenile observational imitation and elder mentoring. Unrepaired settlements decay into **abandoned ruins** that migrating clades can rediscover and reclaim.
+- **Deep-Time Workbench (`--save` / `--load`), Auto-Director (`V`) & Analytics:** Save and resume complete binary `.esav` world snapshots (`K`/`O` in-app or `--save`/`--load` via CLI), follow live ecological drama automatically with **Auto-Director (`V`)**, experiment in the **Specimen Lab (`T`)** and **Experiment Controls (`E`)**, and analyze CSV telemetry with information-theoretic dialect metrics and zero-dependency **SVG Muller plots** (`tools/analyze_run.py --svg`).
 
 ## Download & Run (macOS)
 
@@ -49,20 +50,23 @@ zig build run -Doptimize=ReleaseFast
 
 This compiles a `ReleaseFast` binary, generates the Retina `AppIcon.icns`, assembles `dist/Evolving Societies.app`, installs it into `/Applications/Evolving Societies.app`, and creates `dist/Evolving-Societies-macOS.dmg`.
 
-### Headless Runs, Screenshots & Tests
+### Headless Runs, Snapshots, Screenshots & Tests
 
 ```bash
-# Headless 10-minute simulation with CSV telemetry analysis
-./sim/zig-out/bin/evolving-societies --headless 600 --seed 8080 --out run.csv
-python3 tools/analyze_run.py run.csv
+# Headless 10-minute evolution with binary snapshot + SVG Muller plot
+./sim/zig-out/bin/evolving-societies --headless 600 --seed 8080 --out run.csv --save world.esav
+python3 tools/analyze_run.py run.csv --svg muller.svg
 
-# Capture a Retina screenshot after simulating 260s
-./sim/zig-out/bin/evolving-societies --seed 8080 --shot docs/screenshot.png 260 0.65
+# Load an evolved binary snapshot live into the interactive desktop app
+./sim/zig-out/bin/evolving-societies --load world.esav
+
+# Capture a Retina screenshot after simulating 180s
+./sim/zig-out/bin/evolving-societies --seed 8080 --shot docs/screenshot.png 180 1.05
 
 # Run the test suite
 cd sim
-zig build test -Doptimize=ReleaseFast              # fast unit & online-learning checks
-zig build test -Doptimize=ReleaseFast -Dslow=true  # plus chemotaxis & 6-seed 10-minute worlds
+zig build test -Doptimize=ReleaseFast              # 31 fast unit, immunity, economy & snapshot checks
+zig build test -Doptimize=ReleaseFast -Dslow=true  # all 33 tests incl. chemotaxis & 6-seed 10-min worlds
 ```
 
 <details>
@@ -86,10 +90,12 @@ COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -czf "$CACHE/p/$H.tar.gz" $
 | --- | --- |
 | `WASD` / arrows, right-drag | Pan camera |
 | Mouse wheel / `[` `]` / `0` | Zoom / fit whole world |
-| Left-click | Select & inspect an individual (genes, skills, live mind graph, mental map) |
+| Left-click | Select & inspect an individual (genes, diet, health/antibodies, skills, live mind graph, mental map) |
+| `V` | Toggle **Auto-Director** documentary camera (smoothly tracks live ecological drama) |
+| `K` / `O` | Quick-save / quick-load binary world snapshot (`world_snapshot.esav`) |
 | `C` | Follow selected individual |
 | `B` | Toggle live brain visualization in Inspector |
-| `E` | Open **Experiment Controls** (Pure Neural toggle, spawning, food flood/wipe, weather, wildlife) |
+| `E` | Open **Experiment Controls** (Pure Neural toggle, Seed New Tribe, Trigger Outbreak, spawning, food, weather, wildlife) |
 | `T` | Open **Specimen Lab** (capture, compare, edit traits/skills, mutate, clone) |
 | `G` | Open **History & Generations** panel |
 | `H` | Toggle territory corner brackets |

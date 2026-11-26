@@ -56,6 +56,15 @@ const App = struct {
     overlay: Overlay = .trails,
     selected: ?u32 = null,
     follow: bool = false,
+    director: bool = false,
+    director_timer: f32 = 0,
+    director_target: sim.Vec2 = .{ .x = 0, .y = 0 },
+    director_zoom: f32 = 1.45,
+    director_caption: [96]u8 = @splat(0),
+    director_caption_len: usize = 0,
+    status_note: [80]u8 = @splat(0),
+    status_note_len: usize = 0,
+    status_note_timer: f32 = 0,
     show_brain: bool = true,
     show_key: bool = true,
     show_territories: bool = true,
@@ -100,6 +109,7 @@ pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
         for (app.specimens[0..app.specimen_count]) |sp| gpa.free(sp.fly_gain);
         app.logger.deinit();
     }
+    if (opts.load_path) |lp| try app.world.loadSnapshot(lp);
     app.logger.logNow(&app.world);
     fitCamera(&app.camera);
     const f = &app.world.field;
@@ -142,7 +152,10 @@ pub fn run(gpa: std.mem.Allocator, opts: ui.Options) !void {
             }
         }
         ageToasts(&app, rl.GetFrameTime());
-        if (app.selected) |id| {
+        if (app.status_note_timer > 0) app.status_note_timer = @max(0, app.status_note_timer - rl.GetFrameTime());
+        if (app.director) {
+            updateDirector(&app, rl.GetFrameTime());
+        } else if (app.selected) |id| {
             if (app.world.findById(id)) |e| {
                 if (app.follow) app.camera.target = .{ .x = e.pos.x, .y = e.pos.y };
             } else app.selected = null;
@@ -249,11 +262,13 @@ fn input(app: *App) !void {
     }
     if (panned) {
         app.follow = false;
+        app.director = false;
         clampCamera(cam);
     }
 
     const raw_wheel = rl.GetMouseWheelMove();
     if (raw_wheel != 0 and !ui.mouseOverPanel()) {
+        app.director = false;
         const wheel = std.math.clamp(raw_wheel, -1.5, 1.5);
         zoomBy(cam, @exp(wheel * 0.08), rl.GetMousePosition());
     }
@@ -262,7 +277,28 @@ fn input(app: *App) !void {
     if (rl.IsKeyPressed(rl.KEY_RIGHT_BRACKET)) zoomBy(cam, 1.25, null);
     if (rl.IsKeyPressed(rl.KEY_ZERO)) {
         app.follow = false;
+        app.director = false;
         fitCamera(cam);
+    }
+    if (rl.IsKeyPressed(rl.KEY_V)) {
+        app.director = !app.director;
+        app.director_timer = 0;
+        if (app.director) app.follow = false;
+    }
+    if (rl.IsKeyPressed(rl.KEY_K)) {
+        if (app.world.saveSnapshot("world_snapshot.esav")) {
+            setStatusNote(app, "Saved snapshot: world_snapshot.esav");
+        } else |_| {
+            setStatusNote(app, "Could not save world_snapshot.esav (read-only cwd)");
+        }
+    }
+    if (rl.IsKeyPressed(rl.KEY_O)) {
+        if (app.world.loadSnapshot("world_snapshot.esav")) {
+            app.selected = null;
+            setStatusNote(app, "Loaded snapshot: world_snapshot.esav");
+        } else |_| {
+            setStatusNote(app, "No compatible world_snapshot.esav found");
+        }
     }
 
     if (rl.IsKeyPressed(rl.KEY_SPACE)) app.paused = !app.paused;
@@ -931,9 +967,30 @@ fn drawHud(app: *App) !void {
         fitCamera(&app.camera);
     }
     if (ui.button(rect(zx + 122, zy, 34, 30), " +", .{})) zoomBy(&app.camera, 1.25, null);
+    if (smallBtn(rect(zx + 162, zy + 2, 92, 26), if (app.director) "Director ON" else "Director V", if (app.director) rgb(34, 96, 88) else rgb(38, 44, 62))) {
+        app.director = !app.director;
+        app.director_timer = 0;
+        if (app.director) app.follow = false;
+    }
 
-    text(16, sh - 66, 12, rgb(130, 135, 150), "WASD/drag pan  wheel or [/] zoom  0 fit  click select  C follow  B brain  G history  T lab  E controls  H borders  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
-    text(sw - 560, sh - 22, 11, rgb(100, 105, 120), "Fly circuit: FlyWire connectome v783 (Dorkenwald et al. 2024; Schlegel et al. 2024; Shiu et al. 2024)", .{});
+    if (app.director and app.director_caption_len > 0) {
+        const cw: f32 = 440;
+        const cx = (sw - cw) * 0.5;
+        if (cx > 322) {
+            panel(cx, sh - 104, cw, 28);
+            text(cx + 12, sh - 96, 12, rgb(125, 240, 225), "AUTO-DIRECTOR: {s}", .{app.director_caption[0..app.director_caption_len]});
+        }
+    } else if (app.status_note_timer > 0 and app.status_note_len > 0) {
+        const cw: f32 = 380;
+        const cx = (sw - cw) * 0.5;
+        if (cx > 322) {
+            panel(cx, sh - 104, cw, 28);
+            text(cx + 12, sh - 96, 12, rgb(225, 225, 165), "{s}", .{app.status_note[0..app.status_note_len]});
+        }
+    }
+
+    text(16, sh - 66, 11, rgb(130, 135, 150), "WASD/drag pan  wheel/[/] zoom  0 fit  V director  K/O save/load  C follow  B brain  G history  T lab  E controls  H borders  L key  P overlay  F food  +/- speed  Space pause  R restart", .{});
+    text(sw - 505, sh - 21, 10, rgb(100, 105, 120), "Fly circuit: FlyWire connectome v783 (Dorkenwald et al. 2024; Schlegel et al. 2024; Shiu et al. 2024)", .{});
 
     if (app.selected) |id| {
         if (w.findById(id)) |e| try drawInspector(app, e);
@@ -1999,6 +2056,82 @@ fn drawCognitiveGraph(cog: *const gen.CognitiveBrain, x: f32, y: f32, w: f32, h:
         };
         rl.DrawCircleV(pos[idx], 3.0, withAlpha(col, 110 + @as(u8, @intFromFloat(a * 145))));
     }
+}
+
+fn setStatusNote(app: *App, msg: []const u8) void {
+    const n = @min(msg.len, app.status_note.len);
+    @memcpy(app.status_note[0..n], msg[0..n]);
+    app.status_note_len = n;
+    app.status_note_timer = 4.0;
+}
+
+fn setDirectorCaption(app: *App, comptime fmt: []const u8, args: anytype) void {
+    if (std.fmt.bufPrint(&app.director_caption, fmt, args)) |slice| {
+        app.director_caption_len = slice.len;
+    } else |_| {}
+}
+
+/// Nature-documentary Auto-Director camera: smoothly pans to live high-drama hotspots
+/// (reciprocal trades, apex predator chases, clashes, outbreaks, builders, thriving settlements).
+fn updateDirector(app: *App, frame_dt: f32) void {
+    const w = &app.world;
+    app.director_timer -= frame_dt;
+    if (app.director_timer <= 0) {
+        app.director_timer = 6.5;
+        if (w.trade_arc_count > 0) {
+            const arc = w.trade_arcs[w.trade_arc_count - 1];
+            app.director_target = .{ .x = (arc.from.x + arc.to.x) * 0.5, .y = (arc.from.y + arc.to.y) * 0.5 };
+            app.director_zoom = 1.95;
+            setDirectorCaption(app, "{s}", .{if (arc.reciprocal) "Reciprocal barter exchange!" else "Emergent gift transfer"});
+        } else blk: {
+            // Look for active apex predator hunting near creatures.
+            for (w.predators.items) |pd| {
+                if (pd.hp > 0 and pd.sated_timer <= 0) {
+                    app.director_target = pd.pos;
+                    app.director_zoom = 1.55;
+                    setDirectorCaption(app, "Apex predator stalking the frontier", .{});
+                    break :blk;
+                }
+            }
+            // Look for active outbreak patient or clash/builder.
+            for (w.entities.items) |e| {
+                if (e.dead != null) continue;
+                if (e.infection != null) {
+                    app.director_target = e.pos;
+                    app.director_zoom = 1.85;
+                    setDirectorCaption(app, "Pathogen outbreak in {s} - immune defense active", .{w.clades[@min(e.society, w.clade_count - 1)].name()});
+                    break :blk;
+                }
+            }
+            for (w.entities.items) |e| {
+                if (e.dead != null) continue;
+                if (e.action == .fight and e.enemy != null) {
+                    app.director_target = e.pos;
+                    app.director_zoom = 1.75;
+                    setDirectorCaption(app, "Territorial clash involving {s}", .{w.clades[@min(e.society, w.clade_count - 1)].name()});
+                    break :blk;
+                }
+            }
+            // Fallback: frame the most active clade's living center.
+            var best_si: usize = 0;
+            var best_pop: u32 = 0;
+            for (0..w.clade_count) |si| {
+                const p = w.population(si);
+                if (p > best_pop) {
+                    best_pop = p;
+                    best_si = si;
+                }
+            }
+            app.director_target = w.territories[best_si].center();
+            app.director_zoom = 1.15;
+            setDirectorCaption(app, "Thriving settlement: {s} ({d} alive)", .{ w.clades[best_si].name(), best_pop });
+        }
+    }
+    const alpha = 1.0 - @exp(-2.6 * frame_dt);
+    app.camera.target.x += (app.director_target.x - app.camera.target.x) * alpha;
+    app.camera.target.y += (app.director_target.y - app.camera.target.y) * alpha;
+    app.camera.zoom += (app.director_zoom - app.camera.zoom) * alpha;
+    clampCamera(&app.camera);
 }
 
 // ---------------------------------------------------------------- helpers

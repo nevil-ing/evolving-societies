@@ -1366,3 +1366,38 @@ test "stage D: emergent offer transfers herbs and food at c/b <= 0.30, detects c
     try std.testing.expect(w.entities.items[0].trustOf(w.entities.items[1].id) > 0.25);
     try std.testing.expect(w.entities.items[1].trustOf(w.entities.items[0].id) > 0.25);
 }
+
+test "stage E: binary snapshot save and load preserves full world state deterministically" {
+    const gpa = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const c = try fly.Circuit.parse(arena.allocator(), blob);
+
+    var w1 = try World.init(gpa, &c, 202606);
+    _ = try w1.spawnNewClade(4);
+    _ = w1.triggerOutbreak();
+    for (0..60 * 3) |_| try w1.step(1.0 / 60.0);
+
+    const snap_path: [:0]const u8 = "/tmp/evolving_societies_test.esav";
+    try w1.saveSnapshot(snap_path);
+
+    var w2 = try World.init(gpa, &c, 999999);
+    try w2.loadSnapshot(snap_path);
+
+    try std.testing.expectApproxEqAbs(w1.time, w2.time, 1e-5);
+    try std.testing.expectEqual(w1.clade_count, w2.clade_count);
+    try std.testing.expectEqual(w1.next_id, w2.next_id);
+    try std.testing.expectEqual(w1.resources.items.len, w2.resources.items.len);
+    try std.testing.expectEqual(w1.structures.items.len, w2.structures.items.len);
+    var alive1: usize = 0;
+    for (w1.entities.items) |e| if (e.dead == null) {
+        alive1 += 1;
+    };
+    try std.testing.expectEqual(alive1, w2.entities.items.len);
+    try std.testing.expectApproxEqAbs(w1.soil_nutrients[100], w2.soil_nutrients[100], 1e-6);
+    try std.testing.expectApproxEqAbs(w1.entities.items[0].energy, w2.entities.items[0].energy, 1e-5);
+    try std.testing.expectEqual(w1.entities.items[0].genome.cog.synapse_count, w2.entities.items[0].genome.cog.synapse_count);
+    // Restored world continues stepping cleanly without error!
+    for (0..30) |_| try w2.step(1.0 / 60.0);
+    try std.testing.expect(w2.time > w1.time);
+}

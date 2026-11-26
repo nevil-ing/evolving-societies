@@ -7,9 +7,11 @@ const ui = @import("ui.zig");
 const life_view = @import("life_view.zig");
 
 const usage =
-    \\usage: evolving-societies [--seed N] [--out FILE] [--shot FILE [SECONDS [ZOOM]]] [--headless SECONDS]
+    \\usage: evolving-societies [--seed N] [--out FILE] [--load FILE] [--save FILE] [--shot FILE [SECONDS [ZOOM]]] [--headless SECONDS]
     \\  --seed N            world seed (random if omitted)
     \\  --out FILE          CSV path for run telemetry (default data/world_states/run_<seed>.csv)
+    \\  --load FILE         load a saved binary .esav world snapshot before running
+    \\  --save FILE         save a binary .esav world snapshot after headless run
     \\  --shot FILE         simulate SECONDS (default 90), save a screenshot, exit
     \\  --headless SECONDS  run without opening a window and write CSV telemetry
     \\
@@ -30,6 +32,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, a, "--out") and i + 1 < args.len) {
             i += 1;
             opts.out = args[i];
+        } else if (std.mem.eql(u8, a, "--load") and i + 1 < args.len) {
+            i += 1;
+            opts.load_path = args[i];
+        } else if (std.mem.eql(u8, a, "--save") and i + 1 < args.len) {
+            i += 1;
+            opts.save_path = args[i];
         } else if (std.mem.eql(u8, a, "--headless") and i + 1 < args.len) {
             i += 1;
             headless_secs = try std.fmt.parseInt(u32, args[i], 10);
@@ -54,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
         const seed = opts.seed orelse 7919;
         const circuit = try fly.Circuit.parse(gpa, @embedFile("flybrain"));
         var world = try sim.World.init(gpa, &circuit, seed);
+        if (opts.load_path) |lp| try world.loadSnapshot(lp);
         var logger = log.RunLogger.init(seed, opts.out);
         defer logger.deinit();
         logger.logNow(&world);
@@ -62,6 +71,10 @@ pub fn main(init: std.process.Init) !void {
             logger.maybeLog(&world);
         }
         logger.logNow(&world);
+        if (opts.save_path) |sp| {
+            try world.saveSnapshot(sp);
+            std.debug.print("saved snapshot: {s}\n", .{sp});
+        }
         std.debug.print("headless run complete: {d}s, seed {d}, max gen {d}, clades {d}/{d}, log: {s}\n", .{
             secs, seed, world.max_generation, world.activeCladeCount(), world.clade_count, logger.path(),
         });
